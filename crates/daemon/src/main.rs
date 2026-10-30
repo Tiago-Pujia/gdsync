@@ -52,14 +52,14 @@ fn main() -> Result<()> {
         cfg.cache_max_gb * 1024 * 1024 * 1024,
     )?);
 
-    rt.block_on(sync::initial_sync(&drive, &db))?;
+    rt.block_on(sync::initial_sync(&drive, &db, &cfg))?;
 
     {
-        let (drive, db, cache) = (drive.clone(), db.clone(), cache.clone());
+        let (drive, db, cache, cfg_clone) = (drive.clone(), db.clone(), cache.clone(), cfg.clone());
         let every = Duration::from_secs(cfg.poll_interval_secs.max(5));
         rt.spawn(async move {
             loop {
-                match sync::poll_changes(&drive, &db, &cache).await {
+                match sync::poll_changes(&drive, &db, &cache, &cfg_clone).await {
                     Ok(0) => {}
                     Ok(n) => info!("{n} cambios remotos aplicados"),
                     // Offline or API hiccup: keep serving from the local state.

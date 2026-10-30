@@ -165,6 +165,36 @@ impl Drive {
         Ok(out)
     }
 
+    /// List all non-trashed folders available in Drive.
+    pub async fn list_all_folders(&self) -> Result<Vec<RemoteFile>> {
+        let mut out = Vec::new();
+        let q = format!("mimeType = '{FOLDER_MIME}' and trashed = false");
+        self.list(&q, |files| {
+            out.extend(files);
+            Ok(())
+        })
+        .await?;
+        Ok(out)
+    }
+
+    /// Search for folders matching an exact name or ID.
+    pub async fn search_folder(&self, query: &str) -> Result<Vec<RemoteFile>> {
+        if let Ok(file) = self.get_file(query).await {
+            if file.mime_type == FOLDER_MIME && !file.trashed {
+                return Ok(vec![file]);
+            }
+        }
+        let escaped = query.replace('\\', "\\\\").replace('\'', "\\'");
+        let q = format!("mimeType = '{FOLDER_MIME}' and name = '{escaped}' and trashed = false");
+        let mut out = Vec::new();
+        self.list(&q, |files| {
+            out.extend(files);
+            Ok(())
+        })
+        .await?;
+        Ok(out)
+    }
+
     pub async fn start_page_token(&self) -> Result<String> {
         let r: StartPageToken = self.get(&format!("{API}/changes/startPageToken"), &[]).await?.json().await?;
         Ok(r.start_page_token)

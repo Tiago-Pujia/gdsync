@@ -31,6 +31,9 @@ pub struct Config {
     /// Max size of the content cache (pinned files are never evicted).
     #[serde(default = "default_cache_gb")]
     pub cache_max_gb: u64,
+    /// Folders selected for sync (defaults to ["root"] for full drive).
+    #[serde(default = "default_sync_folders")]
+    pub sync_folders: Vec<String>,
 }
 
 fn default_mount() -> PathBuf {
@@ -42,6 +45,9 @@ fn default_poll() -> u64 {
 fn default_cache_gb() -> u64 {
     10
 }
+fn default_sync_folders() -> Vec<String> {
+    vec!["root".into()]
+}
 
 impl Config {
     pub fn new(client_id: String, client_secret: String) -> Self {
@@ -51,6 +57,7 @@ impl Config {
             mount_point: default_mount(),
             poll_interval_secs: default_poll(),
             cache_max_gb: default_cache_gb(),
+            sync_folders: default_sync_folders(),
         }
     }
     pub fn path() -> PathBuf {
@@ -64,6 +71,36 @@ impl Config {
     }
     pub fn save(&self) -> Result<()> {
         write_private(&Self::path(), &serde_json::to_vec_pretty(self)?)
+    }
+
+    pub fn is_syncing_all(&self) -> bool {
+        self.sync_folders.is_empty() || self.sync_folders.iter().any(|f| f == "root")
+    }
+
+    pub fn add_sync_folder(&mut self, folder_id: String) -> bool {
+        if self.sync_folders == vec!["root".to_string()] {
+            self.sync_folders.clear();
+        }
+        if !self.sync_folders.contains(&folder_id) {
+            self.sync_folders.push(folder_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn remove_sync_folder(&mut self, folder_id: &str) -> bool {
+        let prev_len = self.sync_folders.len();
+        self.sync_folders.retain(|f| f != folder_id);
+        let removed = self.sync_folders.len() != prev_len;
+        if self.sync_folders.is_empty() {
+            self.sync_folders.push("root".into());
+        }
+        removed
+    }
+
+    pub fn reset_sync_folders(&mut self) {
+        self.sync_folders = vec!["root".into()];
     }
 }
 
@@ -84,4 +121,43 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sync_folder_selection() {
+        let mut cfg = Config::new("test_id".into(), "test_secret".into());
+        assert!(cfg.is_syncing_all());
+        assert_eq!(cfg.sync_folders, vec!["root".to_string()]);
+
+        // Adding folder 1 replaces root
+        assert!(cfg.add_sync_folder("folder_a".into()));
+        assert!(!cfg.is_syncing_all());
+        assert_eq!(cfg.sync_folders, vec!["folder_a".to_string()]);
+
+        // Adding second folder
+        assert!(cfg.add_sync_folder("folder_b".into()));
+        assert_eq!(cfg.sync_folders, vec!["folder_a".to_string(), "folder_b".to_string()]);
+
+        // Adding existing folder returns false
+        assert!(!cfg.add_sync_folder("folder_a".into()));
+
+        // Removing folder_a
+        assert!(cfg.remove_sync_folder("folder_a"));
+        assert_eq!(cfg.sync_folders, vec!["folder_b".to_string()]);
+
+        // Removing last folder restores root
+        assert!(cfg.remove_sync_folder("folder_b"));
+        assert!(cfg.is_syncing_all());
+        assert_eq!(cfg.sync_folders, vec!["root".to_string()]);
+
+        // Manual reset
+        cfg.add_sync_folder("folder_c".into());
+        assert!(!cfg.is_syncing_all());
+        cfg.reset_sync_folders();
+        assert!(cfg.is_syncing_all());
+    }
 }
