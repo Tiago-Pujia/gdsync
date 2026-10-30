@@ -20,6 +20,7 @@ rm -f "$BIN_DIR/gdsync" "$BIN_DIR/gdsyncd" "$BIN_DIR/gdsync-gui"
 rm -f "$APPLICATIONS_DIR/gdsync.desktop"
 rm -f "$SERVICEMENUS_DIR/gdsync.desktop"
 rm -f "$SYSTEMD_USER_DIR/gdsyncd.service"
+rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/gdsync-gui.desktop"
 rm -rf "$GDSYNC_DATA_DIR"
 
 if command -v kbuildsycoca6 >/dev/null 2>&1; then

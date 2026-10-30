@@ -142,6 +142,7 @@ Al hacer clic derecho sobre cualquier archivo o carpeta dentro de tu unidad mont
 | `gdsync config set-cache <gb>` | Configura el tamaño máximo de la caché local en GB |
 | `gdsync config set-poll <seg>` | Configura el intervalo de sondeo de cambios remotos |
 | `gdsync gui` | Lanza la interfaz gráfica de usuario |
+| `gdsync autostart` | Administra el inicio automático al iniciar sesión (GUI y daemon) |
 | `gdsync resync` | Limpia la base de datos local y la caché (con el daemon detenido) |
 | `gdsync logout` | Cierra la sesión activa y revoca las credenciales |
 

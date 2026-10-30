@@ -31,8 +31,9 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView,
     QFileDialog, QSpinBox, QLineEdit, QMessageBox, QSystemTrayIcon,
     QMenu, QGroupBox, QStyle, QTextEdit, QComboBox, QSplitter,
-    QDialog, QDialogButtonBox, QAbstractItemView
+    QDialog, QDialogButtonBox, QAbstractItemView, QCheckBox
 )
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 
 # ---- RUTAS ESTÁNDAR ----
 def config_dir():
@@ -43,6 +44,64 @@ def config_path():
 
 def token_path():
     return config_dir() / "token.json"
+
+def autostart_desktop_path() -> Path:
+    return Path.home() / ".config" / "autostart" / "gdsync-gui.desktop"
+
+def is_gui_autostart_enabled() -> bool:
+    p = autostart_desktop_path()
+    if not p.exists():
+        return False
+    try:
+        content = p.read_text(encoding="utf-8")
+        if "X-GNOME-Autostart-enabled=false" in content or "Hidden=true" in content:
+            return False
+        return True
+    except Exception:
+        return False
+
+def set_gui_autostart(enabled: bool):
+    p = autostart_desktop_path()
+    if enabled:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        content = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=gdsync\n"
+            "GenericName=Cliente de Google Drive\n"
+            "Comment=Google Drive sincronizado en tu gestor de archivos\n"
+            "Exec=gdsync gui --minimized\n"
+            "Icon=folder-gdrive\n"
+            "Terminal=false\n"
+            "Categories=Network;FileTransfer;Utility;\n"
+            "StartupNotify=false\n"
+            "X-GNOME-Autostart-enabled=true\n"
+        )
+        p.write_text(content, encoding="utf-8")
+    else:
+        if p.exists():
+            try:
+                p.unlink()
+            except Exception:
+                pass
+
+def is_daemon_autostart_enabled() -> bool:
+    try:
+        res = subprocess.run(
+            ["systemctl", "--user", "is-enabled", "gdsyncd"],
+            capture_output=True,
+            text=True
+        )
+        return res.returncode == 0 and "enabled" in res.stdout
+    except Exception:
+        return False
+
+def set_daemon_autostart(enabled: bool):
+    cmd = "enable" if enabled else "disable"
+    try:
+        subprocess.run(["systemctl", "--user", cmd, "gdsyncd"], check=True)
+    except Exception as e:
+        print(f"Error al {cmd} servicio systemd: {e}")
 
 def data_dir():
     return Path.home() / ".local" / "share" / "gdsync"
@@ -604,6 +663,30 @@ class GdsyncWindow(QMainWindow):
         opts_lay.addLayout(h2)
 
         layout.addWidget(grp_opts)
+
+        # Inicio automático con el sistema
+        grp_autostart = QGroupBox("Inicio automático al iniciar sesión")
+        auto_lay = QVBoxLayout(grp_autostart)
+
+        self.chk_autostart_gui = QCheckBox("Iniciar la aplicación (Bandeja del sistema) al encender la computadora")
+        self.chk_autostart_gui.setChecked(is_gui_autostart_enabled())
+        self.chk_autostart_gui.toggled.connect(self.on_autostart_gui_toggled)
+        auto_lay.addWidget(self.chk_autostart_gui)
+
+        lbl_gui_hint = QLabel("  Se inicia minimizada en la bandeja del sistema lista para usar.")
+        lbl_gui_hint.setStyleSheet("color: gray; font-size: 11px;")
+        auto_lay.addWidget(lbl_gui_hint)
+
+        self.chk_autostart_daemon = QCheckBox("Iniciar el servicio de sincronización (gdsyncd) en segundo plano")
+        self.chk_autostart_daemon.setChecked(is_daemon_autostart_enabled())
+        self.chk_autostart_daemon.toggled.connect(self.on_autostart_daemon_toggled)
+        auto_lay.addWidget(self.chk_autostart_daemon)
+
+        lbl_daemon_hint = QLabel("  Mantiene Google Drive montado y sincronizado automáticamente mediante systemd.")
+        lbl_daemon_hint.setStyleSheet("color: gray; font-size: 11px;")
+        auto_lay.addWidget(lbl_daemon_hint)
+
+        layout.addWidget(grp_autostart)
 
         btn_save = QPushButton("Guardar configuración")
         btn_save.clicked.connect(self.save_settings)
@@ -1265,6 +1348,12 @@ class GdsyncWindow(QMainWindow):
         if dir_selected:
             self.txt_mount.setText(dir_selected)
 
+    def on_autostart_gui_toggled(self, checked: bool):
+        set_gui_autostart(checked)
+
+    def on_autostart_daemon_toggled(self, checked: bool):
+        set_daemon_autostart(checked)
+
     def save_settings(self):
         mount = self.txt_mount.text().strip()
         if not mount:
@@ -1274,6 +1363,8 @@ class GdsyncWindow(QMainWindow):
         self.cfg["cache_max_gb"] = self.spin_cache.value()
         self.cfg["poll_interval_secs"] = self.spin_poll.value()
         save_config(self.cfg)
+        set_gui_autostart(self.chk_autostart_gui.isChecked())
+        set_daemon_autostart(self.chk_autostart_daemon.isChecked())
         ensure_dolphin_bookmark(mount)
         QMessageBox.information(
             self,
@@ -1373,16 +1464,43 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
-    # Control de instancia única para evitar ventanas duplicadas
-    lock_file = data_dir() / "gui.lock"
-    lock_file.parent.mkdir(parents=True, exist_ok=True)
-    lock = QLockFile(str(lock_file))
-    if not lock.tryLock(100):
+    SOCKET_NAME = "gdsync_gui_ipc"
+
+    # Intentar comunicar con una instancia previa
+    socket = QLocalSocket()
+    socket.connectToServer(SOCKET_NAME)
+    if socket.waitForConnected(300):
+        # Si ya hay una instancia y no pedimos inicio minimizado, pedirle que muestre la ventana
+        if "--minimized" not in sys.argv and "--tray" not in sys.argv:
+            socket.write(b"SHOW\n")
+            socket.waitForBytesWritten(300)
         print("gdsync gui ya se encuentra en ejecución.")
         sys.exit(0)
 
+    # Si no se conectó, somos la instancia principal
+    server = QLocalServer()
+    QLocalServer.removeServer(SOCKET_NAME)
+    server.listen(SOCKET_NAME)
+
     win = GdsyncWindow()
-    win.show()
+
+    def handle_ipc():
+        conn = server.nextPendingConnection()
+        if conn:
+            def on_ready():
+                try:
+                    data = conn.readAll().data().decode("utf-8")
+                    if "SHOW" in data:
+                        win.show_and_raise()
+                except Exception:
+                    pass
+            conn.readyRead.connect(on_ready)
+
+    server.newConnection.connect(handle_ipc)
+
+    start_minimized = "--minimized" in sys.argv or "--tray" in sys.argv
+    if not start_minimized:
+        win.show()
     sys.exit(app.exec())
 
 if __name__ == "__main__":

@@ -78,6 +78,35 @@ enum Cmd {
     Logout,
     /// Borra la base de datos local y la caché (ejecutar con el daemon detenido).
     Resync,
+    /// Administra el inicio automático con el sistema al iniciar sesión.
+    Autostart {
+        #[command(subcommand)]
+        sub: Option<AutostartCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AutostartCmd {
+    /// Muestra el estado del inicio automático.
+    Status,
+    /// Habilita el inicio automático de la aplicación y/o el servicio.
+    Enable {
+        /// Habilitar solo la interfaz gráfica (bandeja del sistema)
+        #[arg(long)]
+        gui: bool,
+        /// Habilitar solo el servicio en segundo plano (daemon)
+        #[arg(long)]
+        daemon: bool,
+    },
+    /// Deshabilita el inicio automático.
+    Disable {
+        /// Deshabilitar solo la interfaz gráfica
+        #[arg(long)]
+        gui: bool,
+        /// Deshabilitar solo el servicio en segundo plano
+        #[arg(long)]
+        daemon: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -529,6 +558,81 @@ async fn main() -> Result<()> {
             }
             let _ = std::fs::remove_dir_all(cache_dir().join("blobs"));
             println!("Estado local y caché borrados con éxito.");
+        }
+
+        Cmd::Autostart { sub } => {
+            let config_base = gdsync_core::config::config_dir();
+            let autostart_dir = config_base
+                .parent()
+                .map(|p| p.join("autostart"))
+                .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/autostart"));
+            let autostart_desktop = autostart_dir.join("gdsync-gui.desktop");
+
+            match sub.unwrap_or(AutostartCmd::Status) {
+                AutostartCmd::Status => {
+                    let gui_enabled = autostart_desktop.exists();
+                    let daemon_enabled = std::process::Command::new("systemctl")
+                        .args(["--user", "is-enabled", "gdsyncd"])
+                        .output()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).contains("enabled"))
+                        .unwrap_or(false);
+
+                    println!("=== Estado de inicio automático al iniciar sesión ===");
+                    println!("Interfaz gráfica (Bandeja): {}", if gui_enabled { "Habilitada (se inicia minimizada)" } else { "Deshabilitada" });
+                    println!("Servicio daemon (gdsyncd):  {}", if daemon_enabled { "Habilitado (systemd user)" } else { "Deshabilitado" });
+                    println!("\nComandos útiles:");
+                    println!("  gdsync autostart enable             # Habilita ambos (GUI y daemon)");
+                    println!("  gdsync autostart enable --gui       # Habilita solo la GUI");
+                    println!("  gdsync autostart enable --daemon    # Habilita solo el daemon");
+                    println!("  gdsync autostart disable            # Deshabilita ambos");
+                    println!("  gdsync autostart disable --gui      # Deshabilita solo la GUI");
+                    println!("  gdsync autostart disable --daemon   # Deshabilita solo el daemon");
+                }
+                AutostartCmd::Enable { gui, daemon } => {
+                    let both = !gui && !daemon;
+                    if both || gui {
+                        let _ = std::fs::create_dir_all(&autostart_dir);
+                        let content = "[Desktop Entry]\n\
+                            Type=Application\n\
+                            Name=gdsync\n\
+                            GenericName=Cliente de Google Drive\n\
+                            Comment=Google Drive sincronizado en tu gestor de archivos\n\
+                            Exec=gdsync gui --minimized\n\
+                            Icon=folder-gdrive\n\
+                            Terminal=false\n\
+                            Categories=Network;FileTransfer;Utility;\n\
+                            StartupNotify=false\n\
+                            X-GNOME-Autostart-enabled=true\n";
+                        std::fs::write(&autostart_desktop, content)
+                            .with_context(|| format!("falló al escribir {}", autostart_desktop.display()))?;
+                        println!("✓ Inicio automático de la interfaz gráfica habilitado.");
+                    }
+                    if both || daemon {
+                        let res = std::process::Command::new("systemctl")
+                            .args(["--user", "enable", "gdsyncd"])
+                            .status();
+                        match res {
+                            Ok(s) if s.success() => println!("✓ Servicio systemd de usuario (gdsyncd) habilitado."),
+                            _ => println!("! No se pudo habilitar el servicio en systemd (verificá que el archivo de servicio esté instalado)."),
+                        }
+                    }
+                }
+                AutostartCmd::Disable { gui, daemon } => {
+                    let both = !gui && !daemon;
+                    if both || gui {
+                        if autostart_desktop.exists() {
+                            let _ = std::fs::remove_file(&autostart_desktop);
+                        }
+                        println!("✓ Inicio automático de la interfaz gráfica deshabilitado.");
+                    }
+                    if both || daemon {
+                        let _ = std::process::Command::new("systemctl")
+                            .args(["--user", "disable", "gdsyncd"])
+                            .status();
+                        println!("✓ Servicio systemd de usuario (gdsyncd) deshabilitado.");
+                    }
+                }
+            }
         }
     }
     Ok(())
