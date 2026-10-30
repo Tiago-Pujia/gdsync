@@ -71,7 +71,7 @@ def set_gui_autostart(enabled: bool):
             "GenericName=Cliente de Google Drive\n"
             "Comment=Google Drive sincronizado en tu gestor de archivos\n"
             "Exec=gdsync gui --minimized\n"
-            "Icon=folder-gdrive\n"
+            "Icon=gdsync\n"
             "Terminal=false\n"
             "Categories=Network;FileTransfer;Utility;\n"
             "StartupNotify=false\n"
@@ -84,6 +84,25 @@ def set_gui_autostart(enabled: bool):
                 p.unlink()
             except Exception:
                 pass
+
+def load_app_icon() -> QIcon:
+    # 1. Intentar tema del sistema
+    icon = QIcon.fromTheme("gdsync")
+    if not icon.isNull():
+        return icon
+    # 2. Intentar archivo directo en directorios estándar de gdsync
+    for p in [
+        data_dir() / "icon.png",
+        data_dir() / "icon.svg",
+        Path.home() / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / "gdsync.svg",
+        Path.home() / ".local" / "share" / "icons" / "hicolor" / "256x256" / "apps" / "gdsync.png",
+        Path("packaging/icons/hicolor/scalable/apps/gdsync.svg"),
+        Path("packaging/icons/hicolor/256x256/apps/gdsync.png"),
+    ]:
+        if p.exists():
+            return QIcon(str(p))
+    # 3. Fallback al icono estándar de unidad
+    return QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DriveHDIcon)
 
 def is_daemon_autostart_enabled() -> bool:
     try:
@@ -278,9 +297,12 @@ class GdsyncWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("gdsync - Google Drive")
+        self.setWindowIcon(load_app_icon())
         self.resize(920, 660)
         self.cfg = load_config()
         self.cached_files_ids = set()
+        self.previous_pending_uploads = None
+        self.quota_notified = False
 
         ensure_dolphin_bookmark(self.cfg.get("mount_point", str(Path.home() / "GoogleDrive")))
 
@@ -688,6 +710,18 @@ class GdsyncWindow(QMainWindow):
 
         layout.addWidget(grp_autostart)
 
+        # Notificaciones de escritorio
+        grp_notify = QGroupBox("Notificaciones del sistema")
+        notify_lay = QVBoxLayout(grp_notify)
+        self.chk_notifications = QCheckBox("Mostrar notificaciones de escritorio ante eventos y subidas")
+        self.chk_notifications.setChecked(self.cfg.get("notifications_enabled", True))
+        self.chk_notifications.toggled.connect(self.on_notifications_toggled)
+        notify_lay.addWidget(self.chk_notifications)
+        lbl_notify_hint = QLabel("  Te avisa cuando finaliza la subida de archivos o si tu cuota de Drive está casi llena.")
+        lbl_notify_hint.setStyleSheet("color: gray; font-size: 11px;")
+        notify_lay.addWidget(lbl_notify_hint)
+        layout.addWidget(grp_notify)
+
         btn_save = QPushButton("Guardar configuración")
         btn_save.clicked.connect(self.save_settings)
         layout.addWidget(btn_save)
@@ -738,8 +772,21 @@ class GdsyncWindow(QMainWindow):
     # ---- BANDEJA DEL SISTEMA (TRAY) ----
     def init_tray(self):
         self.tray = QSystemTrayIcon(self)
-        self.tray.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DriveHDIcon))
+        self.tray.setIcon(load_app_icon())
         self.tray.setToolTip("gdsync - Google Drive")
+
+    def notify(self, title: str, message: str, is_warning: bool = False):
+        if not self.cfg.get("notifications_enabled", True):
+            return
+        icon = QSystemTrayIcon.MessageIcon.Warning if is_warning else QSystemTrayIcon.MessageIcon.Information
+        if hasattr(self, "tray") and self.tray and self.tray.isVisible():
+            self.tray.showMessage(title, message, icon, 4000)
+        else:
+            try:
+                urgency = "critical" if is_warning else "normal"
+                subprocess.Popen(["notify-send", "-a", "gdsync", "-u", urgency, "-i", "gdsync", title, message])
+            except Exception:
+                pass
 
         menu = QMenu()
         act_open_dolphin = QAction("Abrir en Dolphin", self)
@@ -1169,10 +1216,15 @@ class GdsyncWindow(QMainWindow):
             self.table_queue.setItem(row_idx, 4, QTableWidgetItem(str(attempts)))
             self.table_queue.setItem(row_idx, 5, QTableWidgetItem(dt_str))
 
-        if not rows:
+        current_pending = sum(1 for r in rows if r[3] in ("pending", "uploading"))
+        if self.previous_pending_uploads is not None and self.previous_pending_uploads > 0 and current_pending == 0:
+            self.notify("gdsync", "Todas las tareas pendientes fueron subidas a Google Drive con éxito.")
+        self.previous_pending_uploads = current_pending
+
+        if not rows or current_pending == 0:
             self.lbl_queue_status.setText("✅ Todo sincronizado. No hay tareas pendientes en la cola.")
         else:
-            self.lbl_queue_status.setText(f"Cola de subidas: {len(rows)} tareas registradas recientemente.")
+            self.lbl_queue_status.setText(f"Cola de subidas: {len(rows)} tareas registradas recientemente ({current_pending} pendientes).")
 
     # ---- PESTAÑA SINCRONIZACIÓN SELECTIVA ----
     def sync_all_clicked(self):
@@ -1354,6 +1406,10 @@ class GdsyncWindow(QMainWindow):
     def on_autostart_daemon_toggled(self, checked: bool):
         set_daemon_autostart(checked)
 
+    def on_notifications_toggled(self, checked: bool):
+        self.cfg["notifications_enabled"] = checked
+        save_config(self.cfg)
+
     def save_settings(self):
         mount = self.txt_mount.text().strip()
         if not mount:
@@ -1362,6 +1418,7 @@ class GdsyncWindow(QMainWindow):
         self.cfg["mount_point"] = mount
         self.cfg["cache_max_gb"] = self.spin_cache.value()
         self.cfg["poll_interval_secs"] = self.spin_poll.value()
+        self.cfg["notifications_enabled"] = self.chk_notifications.isChecked()
         save_config(self.cfg)
         set_gui_autostart(self.chk_autostart_gui.isChecked())
         set_daemon_autostart(self.chk_autostart_daemon.isChecked())

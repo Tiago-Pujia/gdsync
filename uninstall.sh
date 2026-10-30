@@ -21,6 +21,10 @@ rm -f "$APPLICATIONS_DIR/gdsync.desktop"
 rm -f "$SERVICEMENUS_DIR/gdsync.desktop"
 rm -f "$SYSTEMD_USER_DIR/gdsyncd.service"
 rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/gdsync-gui.desktop"
+rm -f "$SHARE_DIR/icons/hicolor/scalable/apps/gdsync.svg"
+rm -f "$SHARE_DIR/icons/hicolor/48x48/apps/gdsync.png"
+rm -f "$SHARE_DIR/icons/hicolor/128x128/apps/gdsync.png"
+rm -f "$SHARE_DIR/icons/hicolor/256x256/apps/gdsync.png"
 rm -rf "$GDSYNC_DATA_DIR"
 
 if command -v kbuildsycoca6 >/dev/null 2>&1; then

@@ -598,7 +598,7 @@ async fn main() -> Result<()> {
                             GenericName=Cliente de Google Drive\n\
                             Comment=Google Drive sincronizado en tu gestor de archivos\n\
                             Exec=gdsync gui --minimized\n\
-                            Icon=folder-gdrive\n\
+                            Icon=gdsync\n\
                             Terminal=false\n\
                             Categories=Network;FileTransfer;Utility;\n\
                             StartupNotify=false\n\

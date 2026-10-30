@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E232A" />
+      <stop offset="100%" stop-color="#12161A" />
+    </linearGradient>
+
+    <!-- Google Drive Colors with rich gradients -->
+    <linearGradient id="blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4285F4" />
+      <stop offset="100%" stop-color="#1967D2" />
+    </linearGradient>
+
+    <linearGradient id="greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34A853" />
+      <stop offset="100%" stop-color="#137333" />
+    </linearGradient>
+
+    <linearGradient id="yellowGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FBBC04" />
+      <stop offset="100%" stop-color="#EA8600" />
+    </linearGradient>
+
+    <linearGradient id="redGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#EA4335" />
+      <stop offset="100%" stop-color="#C5221F" />
+    </linearGradient>
+
+    <!-- Sync Arrows Gradient -->
+    <linearGradient id="syncGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#E8F0FE" />
+    </linearGradient>
+
+    <!-- Shadows -->
+    <filter id="dropShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.35" />
+    </filter>
+
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.25" />
+    </filter>
+  </defs>
+
+  <!-- App Squircle Base (Modern Linux Desktop Style) -->
+  <rect x="24" y="24" width="464" height="464" rx="104" fill="url(#bgGrad)" stroke="#2D333B" stroke-width="4" filter="url(#dropShadow)" />
+
+  <!-- Subtle Inner Border Highlight -->
+  <rect x="26" y="26" width="460" height="460" rx="102" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="2" />
+
+  <!-- Main Drive Triangle Graphic -->
+  <g transform="translate(256, 240) scale(1.08) translate(-256, -240)" filter="url(#glow)">
+    <!-- Green Side (Left/Diagonal) -->
+    <path d="M 175 125 L 115 230 L 210 395 L 270 290 Z" fill="url(#greenGrad)" />
+
+    <!-- Yellow Side (Top/Right) -->
+    <path d="M 175 125 L 337 125 L 397 230 L 235 230 Z" fill="url(#yellowGrad)" />
+
+    <!-- Blue Side (Bottom/Base) -->
+    <path d="M 235 230 L 397 230 L 337 395 L 210 395 Z" fill="url(#blueGrad)" />
+  </g>
+
+  <!-- Circular Sync Badges / Dynamic Sync Ring Overlay -->
+  <g transform="translate(256, 256)" filter="url(#dropShadow)">
+    <!-- Circular Sync Badge Background -->
+    <circle cx="0" cy="0" r="88" fill="#1E232A" stroke="#38404A" stroke-width="5" />
+    <circle cx="0" cy="0" r="76" fill="#252D37" />
+
+    <!-- Sync Arrow Top-Right -->
+    <path d="M -15 -52 A 54 54 0 0 1 52 -12" fill="none" stroke="url(#syncGrad)" stroke-width="12" stroke-linecap="round" />
+    <!-- Arrow Head Top-Right -->
+    <polygon points="56,-26 62,-2 38,-8" fill="#FFFFFF" />
+
+    <!-- Sync Arrow Bottom-Left -->
+    <path d="M 15 52 A 54 54 0 0 1 -52 12" fill="none" stroke="url(#syncGrad)" stroke-width="12" stroke-linecap="round" />
+    <!-- Arrow Head Bottom-Left -->
+    <polygon points="-56,26 -62,2 -38,8" fill="#FFFFFF" />
+
+    <!-- Center Pulse Dot (Green Connected Status) -->
+    <circle cx="0" cy="0" r="14" fill="url(#greenGrad)" stroke="#FFFFFF" stroke-width="3" />
+  </g>
+</svg>

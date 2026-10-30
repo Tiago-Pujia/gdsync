@@ -110,13 +110,12 @@ pub async fn process_upload_queue(drive: &Drive, db: &Db, cache: &Cache) -> Resu
                     let item = db.by_id(&task.file_id)?.context("elemento local no encontrado")?;
                     let parent_id = item.parent_id.as_deref().unwrap_or("root");
                     let local_path = cache.path(&task.file_id);
-                    let data = if local_path.exists() {
-                        tokio::fs::read(&local_path).await?
+                    info!("subiendo nuevo archivo '{}' desde '{}'", item.name, local_path.display());
+                    let remote = if local_path.exists() {
+                        drive.upload_file_path(&item.name, parent_id, &item.mime, &local_path).await?
                     } else {
-                        Vec::new()
+                        drive.create_remote_file(&item.name, parent_id, &item.mime, Vec::new()).await?
                     };
-                    info!("subiendo nuevo archivo '{}' ({} bytes)", item.name, data.len());
-                    let remote = drive.create_remote_file(&item.name, parent_id, &item.mime, data).await?;
                     let mtime = remote.modified_time.as_deref().and_then(crate::db::parse_rfc3339).unwrap_or(0);
                     let new_cache_path = cache.path(&remote.id);
                     if local_path.exists() {
@@ -130,10 +129,10 @@ pub async fn process_upload_queue(drive: &Drive, db: &Db, cache: &Cache) -> Resu
                     let item = db.by_id(&task.file_id)?.context("elemento no encontrado")?;
                     let local_path = cache.path(&task.file_id);
                     if local_path.exists() {
-                        let data = tokio::fs::read(&local_path).await?;
-                        let data_len = data.len() as u64;
+                        let meta = tokio::fs::metadata(&local_path).await?;
+                        let data_len = meta.len();
                         info!("subiendo cambios de '{}' ({data_len} bytes)", item.name);
-                        let remote = drive.update_remote_file(&task.file_id, &item.mime, data).await?;
+                        let remote = drive.update_file_path(&task.file_id, &item.mime, &local_path).await?;
                         let mtime = remote.modified_time.as_deref().and_then(crate::db::parse_rfc3339).unwrap_or(0);
                         db.update_item_size_mtime(&task.file_id, data_len, mtime)?;
                     }

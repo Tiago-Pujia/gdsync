@@ -7,7 +7,7 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use std::path::Path;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 pub const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
@@ -368,5 +368,250 @@ impl Drive {
             Some((data, mime.to_string())),
         ).await?;
         Ok(resp.json().await?)
+    }
+
+    /// Inicia una sesión de subida resumible en Google Drive y devuelve la URL de sesión.
+    async fn start_resumable_session(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        query: &[(&str, &str)],
+        mime: &str,
+        total_size: u64,
+        metadata: &serde_json::Value,
+    ) -> Result<String> {
+        let bearer = self.bearer().await?;
+        let body_bytes = serde_json::to_vec(metadata)?;
+        let resp = self
+            .http
+            .request(method, url)
+            .bearer_auth(bearer)
+            .query(query)
+            .header("X-Upload-Content-Type", mime)
+            .header("X-Upload-Content-Length", total_size.to_string())
+            .header(reqwest::header::CONTENT_TYPE, "application/json; charset=UTF-8")
+            .body(body_bytes)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("falló al iniciar subida resumible ({status}): {body}");
+        }
+
+        let loc = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .context("la respuesta no contiene cabecera Location para subida resumible")?
+            .to_str()?
+            .to_string();
+
+        Ok(loc)
+    }
+
+    /// Ejecuta la subida de un archivo en bloques de 8 MB con soporte para reanudación ante cortes.
+    async fn execute_resumable_upload(
+        &self,
+        session_url: &str,
+        file_path: &Path,
+        total_size: u64,
+    ) -> Result<RemoteFile> {
+        const CHUNK_SIZE: u64 = 8 * 1024 * 1024; // 8 MB por bloque
+        let mut file = tokio::fs::File::open(file_path).await?;
+        let mut uploaded = 0u64;
+
+        if total_size == 0 {
+            let bearer = self.bearer().await?;
+            let resp = self
+                .http
+                .put(session_url)
+                .bearer_auth(bearer)
+                .header(reqwest::header::CONTENT_LENGTH, "0")
+                .header("Content-Range", "bytes */0")
+                .send()
+                .await?;
+            return Ok(resp.json().await?);
+        }
+
+        while uploaded < total_size {
+            let chunk_len = (total_size - uploaded).min(CHUNK_SIZE);
+            file.seek(std::io::SeekFrom::Start(uploaded)).await?;
+            let mut buf = vec![0u8; chunk_len as usize];
+            file.read_exact(&mut buf).await?;
+
+            let range_end = uploaded + chunk_len - 1;
+            let range_header = format!("bytes {uploaded}-{range_end}/{total_size}");
+
+            let mut attempt = 0;
+            let mut delay = Duration::from_millis(500);
+
+            loop {
+                let bearer = self.bearer().await?;
+                let resp = self
+                    .http
+                    .put(session_url)
+                    .bearer_auth(&bearer)
+                    .header(reqwest::header::CONTENT_LENGTH, chunk_len.to_string())
+                    .header("Content-Range", &range_header)
+                    .body(buf.clone())
+                    .send()
+                    .await;
+
+                match resp {
+                    Ok(r) if r.status().is_success() => {
+                        let remote: RemoteFile = r.json().await?;
+                        return Ok(remote);
+                    }
+                    Ok(r) if r.status().as_u16() == 308 => {
+                        if let Some(range) = r.headers().get("Range") {
+                            if let Ok(s) = range.to_str() {
+                                if let Some(last) = s.split('-').nth(1).and_then(|v| v.parse::<u64>().ok()) {
+                                    uploaded = last + 1;
+                                    break;
+                                }
+                            }
+                        }
+                        uploaded += chunk_len;
+                        break;
+                    }
+                    Ok(r) if attempt < 5 && (r.status() == StatusCode::TOO_MANY_REQUESTS || r.status().is_server_error()) => {
+                        attempt += 1;
+                        tokio::time::sleep(delay).await;
+                        delay *= 2;
+                    }
+                    Err(_) if attempt < 5 => {
+                        attempt += 1;
+                        tokio::time::sleep(delay).await;
+                        delay *= 2;
+
+                        // Consultar estado de bytes recibidos por Google Drive
+                        if let Ok(bearer) = self.bearer().await {
+                            if let Ok(status_resp) = self
+                                .http
+                                .put(session_url)
+                                .bearer_auth(bearer)
+                                .header(reqwest::header::CONTENT_LENGTH, "0")
+                                .header("Content-Range", format!("bytes */{total_size}"))
+                                .send()
+                                .await
+                            {
+                                if status_resp.status().as_u16() == 308 {
+                                    if let Some(range) = status_resp.headers().get("Range") {
+                                        if let Ok(s) = range.to_str() {
+                                            if let Some(last) = s.split('-').nth(1).and_then(|v| v.parse::<u64>().ok()) {
+                                                uploaded = last + 1;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                } else if status_resp.status().is_success() {
+                                    let remote: RemoteFile = status_resp.json().await?;
+                                    return Ok(remote);
+                                }
+                            }
+                        }
+                    }
+                    Ok(r) => {
+                        let status = r.status();
+                        let body = r.text().await.unwrap_or_default();
+                        bail!("error durante subida resumible ({status}): {body}");
+                    }
+                    Err(e) => {
+                        bail!("falló la conexión durante la subida en chunk {range_header}: {e}");
+                    }
+                }
+            }
+        }
+
+        let bearer = self.bearer().await?;
+        let resp = self
+            .http
+            .put(session_url)
+            .bearer_auth(bearer)
+            .header(reqwest::header::CONTENT_LENGTH, "0")
+            .header("Content-Range", format!("bytes */{total_size}"))
+            .send()
+            .await?;
+        if resp.status().is_success() {
+            let remote: RemoteFile = resp.json().await?;
+            Ok(remote)
+        } else {
+            bail!("subida finalizada pero no se recibió confirmación de Google Drive");
+        }
+    }
+
+    /// Sube un archivo a Drive eligiendo automáticamente entre subida directa
+    /// (multipart) para archivos pequeños (< 5 MB) o subida resumible en bloques para archivos grandes.
+    pub async fn upload_file_path(
+        &self,
+        name: &str,
+        parent_id: &str,
+        mime: &str,
+        file_path: &Path,
+    ) -> Result<RemoteFile> {
+        let meta = tokio::fs::metadata(file_path).await?;
+        let size = meta.len();
+
+        if size < 5 * 1024 * 1024 {
+            let data = if size > 0 {
+                tokio::fs::read(file_path).await?
+            } else {
+                Vec::new()
+            };
+            return self.create_remote_file(name, parent_id, mime, data).await;
+        }
+
+        let metadata = serde_json::json!({
+            "name": name,
+            "parents": [parent_id]
+        });
+        let session_url = self
+            .start_resumable_session(
+                reqwest::Method::POST,
+                &format!("{UPLOAD_API}/files"),
+                &[("uploadType", "resumable"), ("fields", FILE_FIELDS)],
+                mime,
+                size,
+                &metadata,
+            )
+            .await?;
+
+        self.execute_resumable_upload(&session_url, file_path, size).await
+    }
+
+    /// Actualiza el contenido de un archivo en Drive usando subida directa para archivos
+    /// pequeños o subida resumible en bloques para archivos grandes.
+    pub async fn update_file_path(
+        &self,
+        file_id: &str,
+        mime: &str,
+        file_path: &Path,
+    ) -> Result<RemoteFile> {
+        let meta = tokio::fs::metadata(file_path).await?;
+        let size = meta.len();
+
+        if size < 5 * 1024 * 1024 {
+            let data = if size > 0 {
+                tokio::fs::read(file_path).await?
+            } else {
+                Vec::new()
+            };
+            return self.update_remote_file(file_id, mime, data).await;
+        }
+
+        let metadata = serde_json::json!({});
+        let session_url = self
+            .start_resumable_session(
+                reqwest::Method::PATCH,
+                &format!("{UPLOAD_API}/files/{file_id}"),
+                &[("uploadType", "resumable"), ("fields", FILE_FIELDS)],
+                mime,
+                size,
+                &metadata,
+            )
+            .await?;
+
+        self.execute_resumable_upload(&session_url, file_path, size).await
     }
 }

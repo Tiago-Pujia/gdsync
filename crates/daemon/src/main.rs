@@ -81,7 +81,17 @@ fn main() -> Result<()> {
                 // 1. Process pending local uploads first
                 match sync::process_upload_queue(&drive, &db, &cache).await {
                     Ok(0) => {}
-                    Ok(n) => info!("{n} tareas locales subidas a Drive"),
+                    Ok(n) => {
+                        info!("{n} tareas locales subidas a Drive");
+                        let _ = std::process::Command::new("notify-send")
+                            .args([
+                                "-a", "gdsync",
+                                "-i", "gdsync",
+                                "gdsync",
+                                &format!("{n} archivo(s) sincronizado(s) con Google Drive."),
+                            ])
+                            .spawn();
+                    }
                     Err(e) => warn!("error procesando cola de subida: {e:#}"),
                 }
 
