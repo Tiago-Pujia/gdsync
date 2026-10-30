@@ -132,14 +132,8 @@ impl Db {
                  attempts INTEGER NOT NULL DEFAULT 0,
                  last_error TEXT
              );
-              CREATE INDEX IF NOT EXISTS upload_queue_status ON upload_queue(status);",
+             CREATE INDEX IF NOT EXISTS upload_queue_status ON upload_queue(status);",
         )?;
-        // Migration: ensure orphan items (e.g. shared or loose files) attach to root so they are visible
-        let _ = conn.execute(
-            "UPDATE items SET parent_id = (SELECT id FROM items WHERE ino=1)
-             WHERE (parent_id IS NULL OR parent_id = '') AND ino != 1 AND EXISTS (SELECT 1 FROM items WHERE ino=1);",
-            [],
-        );
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -149,16 +143,11 @@ impl Db {
 
     // ---- items ----
 
-    fn upsert_with(conn: &Connection, f: &RemoteFile, ino: Option<u64>, root_id: Option<&str>) -> rusqlite::Result<()> {
+    fn upsert_with(conn: &Connection, f: &RemoteFile, ino: Option<u64>) -> rusqlite::Result<()> {
         let size: i64 = f.size.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
         let mtime = f.modified_time.as_deref().and_then(parse_rfc3339).unwrap_or(0);
-        // Root is the only item without parent; non-root items without parents (e.g. shared or loose items)
-        // default to root_id so they appear in the root directory.
-        let parent = if ino == Some(ROOT_INO) {
-            None
-        } else {
-            f.parents.first().cloned().or_else(|| root_id.map(|s| s.to_string()))
-        };
+        // Root is the only item without parent; Drive is single-parent since 2020.
+        let parent = if ino == Some(ROOT_INO) { None } else { f.parents.first().cloned() };
         conn.execute(
             "INSERT INTO items(ino,id,parent_id,name,mime,size,md5,mtime,web_link)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
@@ -172,14 +161,14 @@ impl Db {
     }
 
     pub fn upsert_root(&self, f: &RemoteFile) -> Result<()> {
-        Self::upsert_with(&self.conn(), f, Some(ROOT_INO), None)?;
+        Self::upsert_with(&self.conn(), f, Some(ROOT_INO))?;
         self.kv_set("root_id", &f.id)
     }
 
     pub fn upsert(&self, f: &RemoteFile) -> Result<()> {
         let root = self.kv_get("root_id")?;
         let ino = (root.as_deref() == Some(f.id.as_str())).then_some(ROOT_INO);
-        Self::upsert_with(&self.conn(), f, ino, root.as_deref())?;
+        Self::upsert_with(&self.conn(), f, ino)?;
         Ok(())
     }
 
@@ -189,7 +178,7 @@ impl Db {
         let tx = conn.transaction()?;
         for f in files {
             let ino = (root.as_deref() == Some(f.id.as_str())).then_some(ROOT_INO);
-            Self::upsert_with(&tx, f, ino, root.as_deref())?;
+            Self::upsert_with(&tx, f, ino)?;
         }
         tx.commit()?;
         Ok(())
