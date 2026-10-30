@@ -1,0 +1,10 @@
+[package]
+name = "gdsync"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gdsync-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true

@@ -1,0 +1,12 @@
+[Unit]
+Description=gdsync - Google Drive en tu gestor de archivos
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.cargo/bin/gdsyncd
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
