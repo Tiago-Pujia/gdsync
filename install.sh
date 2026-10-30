@@ -29,13 +29,13 @@ mkdir -p "$GDSYNC_DATA_DIR/gui"
 
 # 3. Instalar binarios
 echo "Instalando binarios en $BIN_DIR..."
-cp target/release/gdsync "$BIN_DIR/gdsync"
-cp target/release/gdsyncd "$BIN_DIR/gdsyncd"
+cp --remove-destination target/release/gdsync "$BIN_DIR/gdsync"
+cp --remove-destination target/release/gdsyncd "$BIN_DIR/gdsyncd"
 chmod +x "$BIN_DIR/gdsync" "$BIN_DIR/gdsyncd"
 
 # 4. Instalar GUI y crear launcher ejecutable
 echo "Instalando interfaz gráfica (PyQt6)..."
-cp src/gui/main.py "$GDSYNC_DATA_DIR/gui/main.py"
+cp --remove-destination src/gui/main.py "$GDSYNC_DATA_DIR/gui/main.py"
 chmod +x "$GDSYNC_DATA_DIR/gui/main.py"
 
 cat << 'EOF' > "$BIN_DIR/gdsync-gui"

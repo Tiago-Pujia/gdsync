@@ -56,9 +56,24 @@ El instalador dejará listos en tu usuario (`~/.local/bin`):
 
 ### A. Iniciar sesión
 
-```bash
-gdsync login --client-id TU_CLIENT_ID --client-secret TU_CLIENT_SECRET
-```
+Podés iniciar sesión de cualquiera de las siguientes formas:
+
+1. **Pasando tu archivo JSON de Google Cloud directamente:**
+   ```bash
+   gdsync login ~/Descargas/client_secret_*.json
+   # o con la opción:
+   gdsync login --credentials ~/Descargas/client_secret_*.json
+   ```
+2. **De forma interactiva (detecta automáticamente el archivo en Descargas/Downloads):**
+   ```bash
+   gdsync login
+   ```
+3. **O pasando Client ID y Secret manualmente:**
+   ```bash
+   gdsync login --client-id TU_CLIENT_ID --client-secret TU_CLIENT_SECRET
+   ```
+4. **Desde la Interfaz Gráfica (GUI):**
+   Abrí `gdsync gui`, andá a la pestaña **👤 Cuenta y Conexión** y hacé clic en **📄 Importar archivo JSON de Google (client_secret_*.json)...**. Se detectarán las claves automáticamente y podrás iniciar sesión con un solo clic.
 Se abrirá automáticamente tu navegador para autorizar la aplicación de forma segura con OAuth 2.0 PKCE.
 
 ### B. Iniciar el servicio y montar Drive

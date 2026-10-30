@@ -60,6 +60,8 @@ fn main() -> Result<()> {
     if let Ok((used, total)) = rt.block_on(drive.about_storage()) {
         total_space.store(total, Ordering::Relaxed);
         used_space.store(used, Ordering::Relaxed);
+        let _ = db.kv_set("storage_total", &total.to_string());
+        let _ = db.kv_set("storage_used", &used.to_string());
     }
 
     rt.block_on(sync::initial_sync(&drive, &db, &cfg))?;
@@ -93,6 +95,8 @@ fn main() -> Result<()> {
                     if let Ok((used, total)) = drive.about_storage().await {
                         total_s.store(total, Ordering::Relaxed);
                         used_s.store(used, Ordering::Relaxed);
+                        let _ = db.kv_set("storage_total", &total.to_string());
+                        let _ = db.kv_set("storage_used", &used.to_string());
                     }
                 }
 

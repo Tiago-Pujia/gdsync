@@ -126,6 +126,45 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Extracts (client_id, client_secret) from a Google Cloud Console credentials JSON string.
+/// Handles standard format `{"installed": {"client_id": "...", "client_secret": "..."}}`,
+/// `{"web": {...}}`, or flat `{"client_id": "...", "client_secret": "..."}`.
+pub fn parse_google_credentials_json(content: &str) -> Result<(String, String)> {
+    let val: serde_json::Value = serde_json::from_str(content)
+        .context("el archivo no contiene un JSON válido")?;
+
+    let node = if let Some(installed) = val.get("installed") {
+        installed
+    } else if let Some(web) = val.get("web") {
+        web
+    } else {
+        &val
+    };
+
+    let client_id = node.get("client_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .context("no se encontró 'client_id' en el archivo JSON de Google")?
+        .trim()
+        .to_string();
+
+    let client_secret = node.get("client_secret")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .context("no se encontró 'client_secret' en el archivo JSON de Google")?
+        .trim()
+        .to_string();
+
+    Ok((client_id, client_secret))
+}
+
+/// Reads a credentials JSON file from disk and extracts (client_id, client_secret).
+pub fn parse_google_credentials_file(path: &Path) -> Result<(String, String)> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("no se pudo leer el archivo de credenciales en {}", path.display()))?;
+    parse_google_credentials_json(&content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +221,42 @@ mod tests {
         let parsed: Config = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed.client_id, "foo");
         assert_eq!(parsed.cache_max_gb, 10);
+    }
+
+    #[test]
+    fn test_parse_google_credentials_json() {
+        let installed_json = r#"{
+            "installed": {
+                "client_id": "test_id_installed.apps.googleusercontent.com",
+                "project_id": "test_proj",
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_secret": "secret_installed_123"
+            }
+        }"#;
+        let (id, secret) = parse_google_credentials_json(installed_json).unwrap();
+        assert_eq!(id, "test_id_installed.apps.googleusercontent.com");
+        assert_eq!(secret, "secret_installed_123");
+
+        let web_json = r#"{
+            "web": {
+                "client_id": "test_id_web.apps.googleusercontent.com",
+                "client_secret": "secret_web_456"
+            }
+        }"#;
+        let (id, secret) = parse_google_credentials_json(web_json).unwrap();
+        assert_eq!(id, "test_id_web.apps.googleusercontent.com");
+        assert_eq!(secret, "secret_web_456");
+
+        let flat_json = r#"{
+            "client_id": "test_id_flat",
+            "client_secret": "secret_flat"
+        }"#;
+        let (id, secret) = parse_google_credentials_json(flat_json).unwrap();
+        assert_eq!(id, "test_id_flat");
+        assert_eq!(secret, "secret_flat");
+
+        let invalid = r#"{"other": {}}"#;
+        assert!(parse_google_credentials_json(invalid).is_err());
     }
 }

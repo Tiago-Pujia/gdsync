@@ -20,7 +20,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Inicia sesión con Google OAuth (la primera vez pasá tus credenciales o completá el prompt).
+    /// Inicia sesión con Google OAuth (la primera vez pasá tus credenciales, el archivo JSON o completá el prompt).
     Login {
         /// OAuth Client ID de Google Cloud Console
         #[arg(long)]
@@ -28,6 +28,12 @@ enum Cmd {
         /// OAuth Client Secret de Google Cloud Console
         #[arg(long)]
         client_secret: Option<String>,
+        /// Ruta al archivo JSON descargado de Google Cloud Console (client_secret_*.json)
+        #[arg(short = 'c', long = "credentials")]
+        credentials: Option<PathBuf>,
+        /// Archivo JSON de credenciales opcional como argumento posicional
+        #[arg(value_name = "CREDENTIALS_JSON")]
+        file: Option<PathBuf>,
     },
     /// Lista el contenido remoto de Drive directamente desde la API.
     Ls {
@@ -130,27 +136,94 @@ fn prompt_input(prompt: &str) -> Result<String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Login { client_id, client_secret } => {
-            let cfg = match (client_id, client_secret) {
+        Cmd::Login { client_id, client_secret, credentials, file } => {
+            let json_file = credentials.or(file);
+            let (cid, csecret) = if let Some(path) = json_file {
+                println!("Leyendo credenciales desde: {}", path.display());
+                let (id, secret) = gdsync_core::config::parse_google_credentials_file(&path)?;
+                println!("Credenciales de Google importadas correctamente.");
+                (Some(id), Some(secret))
+            } else {
+                (client_id, client_secret)
+            };
+
+            let cfg = match (cid, csecret) {
                 (Some(id), Some(secret)) => {
-                    let mut cfg = Config::load().unwrap_or_else(|_| Config::new(id.clone(), secret.clone()));
+                    let mut cfg = Config::load_or_default();
                     cfg.client_id = id;
                     cfg.client_secret = secret;
                     cfg.save()?;
                     cfg
                 }
                 (None, None) => match Config::load() {
-                    Ok(cfg) => cfg,
-                    Err(_) => {
-                        println!("No se encontró configuración previa. Ingresá tus credenciales de Google Cloud:");
-                        let id = prompt_input("OAuth Client ID")?;
-                        let secret = prompt_input("OAuth Client Secret")?;
-                        let cfg = Config::new(id, secret);
+                    Ok(cfg) if !cfg.client_id.is_empty() && !cfg.client_secret.is_empty() => cfg,
+                    _ => {
+                        println!("No se encontró configuración previa.");
+                        let detected = std::env::var("HOME").ok().map(PathBuf::from).and_then(|h| {
+                            for sub in ["Descargas", "Downloads"] {
+                                let dir = h.join(sub);
+                                if let Ok(entries) = std::fs::read_dir(&dir) {
+                                    for entry in entries.flatten() {
+                                        let path = entry.path();
+                                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                            if name.starts_with("client_secret_") && name.ends_with(".json") {
+                                                return Some(path);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            None
+                        });
+
+                        let (id, secret) = if let Some(found_path) = detected {
+                            println!("Se detectó automáticamente un archivo de claves en:");
+                            println!("  -> {}", found_path.display());
+                            print!("¿Deseás usar este archivo de credenciales de Google? [S/n]: ");
+                            io::stdout().flush()?;
+                            let mut ans = String::new();
+                            io::stdin().read_line(&mut ans)?;
+                            let ans_trim = ans.trim().to_lowercase();
+                            if ans_trim.is_empty() || ans_trim == "s" || ans_trim == "si" || ans_trim == "y" || ans_trim == "yes" {
+                                gdsync_core::config::parse_google_credentials_file(&found_path)?
+                            } else {
+                                print!("Ruta al archivo JSON (o Enter para ingresar ID/Secret manualmente): ");
+                                io::stdout().flush()?;
+                                let mut line = String::new();
+                                io::stdin().read_line(&mut line)?;
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    gdsync_core::config::parse_google_credentials_file(&PathBuf::from(trimmed))?
+                                } else {
+                                    let id = prompt_input("OAuth Client ID")?;
+                                    let secret = prompt_input("OAuth Client Secret")?;
+                                    (id, secret)
+                                }
+                            }
+                        } else {
+                            println!("Podés ingresar la ruta a tu archivo JSON de Google (ej. ~/Descargas/client_secret_*.json)");
+                            print!("Ruta a archivo JSON (o Enter para ingresar ID/Secret manualmente): ");
+                            io::stdout().flush()?;
+                            let mut line = String::new();
+                            io::stdin().read_line(&mut line)?;
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                let p = PathBuf::from(trimmed);
+                                gdsync_core::config::parse_google_credentials_file(&p)?
+                            } else {
+                                let id = prompt_input("OAuth Client ID")?;
+                                let secret = prompt_input("OAuth Client Secret")?;
+                                (id, secret)
+                            }
+                        };
+                        let mut cfg = Config::load_or_default();
+                        cfg.client_id = id;
+                        cfg.client_secret = secret;
                         cfg.save()?;
                         cfg
                     }
                 },
-                _ => bail!("debés pasar tanto --client-id como --client-secret"),
+                _ => bail!("debés pasar tanto --client-id como --client-secret, o la ruta al archivo JSON descargado"),
             };
 
             auth::login(&cfg).await?;
@@ -223,6 +296,17 @@ async fn main() -> Result<()> {
                     db.cache_total()? as f64 / 1_000_000.0,
                     cfg.cache_max_gb
                 );
+                println!("Cola de subidas:      {} tarea(s) pendiente(s)", db.pending_uploads_count()?);
+                if let (Ok(Some(tot)), Ok(Some(used))) = (db.kv_get("storage_total"), db.kv_get("storage_used")) {
+                    if let (Ok(tot_b), Ok(used_b)) = (tot.parse::<u64>(), used.parse::<u64>()) {
+                        println!(
+                            "Cuota de Drive:       {:.2} GB usados de {:.2} GB ({:.1}%)",
+                            used_b as f64 / 1_000_000_000.0,
+                            tot_b as f64 / 1_000_000_000.0,
+                            (used_b as f64 / tot_b.max(1) as f64) * 100.0
+                        );
+                    }
+                }
             } else {
                 println!("Base de datos local:  Aún no inicializada (iniciá gdsyncd para montar)");
             }
