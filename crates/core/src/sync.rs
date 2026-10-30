@@ -95,3 +95,109 @@ pub async fn poll_changes(drive: &Drive, db: &Db, cache: &Cache, cfg: &Config) -
     db.kv_set(PAGE_TOKEN, &next)?;
     Ok(changes.len())
 }
+
+/// Processes pending items in the upload queue (submitting local creates, edits, renames, deletes).
+pub async fn process_upload_queue(drive: &Drive, db: &Db, cache: &Cache) -> Result<usize> {
+    let tasks = db.peek_pending_uploads(10)?;
+    if tasks.is_empty() {
+        return Ok(0);
+    }
+    let mut done = 0;
+    for task in tasks {
+        let res: Result<()> = async {
+            match task.op.as_str() {
+                "create" => {
+                    let item = db.by_id(&task.file_id)?.context("elemento local no encontrado")?;
+                    let parent_id = item.parent_id.as_deref().unwrap_or("root");
+                    let local_path = cache.path(&task.file_id);
+                    let data = if local_path.exists() {
+                        tokio::fs::read(&local_path).await?
+                    } else {
+                        Vec::new()
+                    };
+                    info!("subiendo nuevo archivo '{}' ({} bytes)", item.name, data.len());
+                    let remote = drive.create_remote_file(&item.name, parent_id, &item.mime, data).await?;
+                    let mtime = remote.modified_time.as_deref().and_then(crate::db::parse_rfc3339).unwrap_or(0);
+                    let new_cache_path = cache.path(&remote.id);
+                    if local_path.exists() {
+                        let _ = tokio::fs::rename(&local_path, &new_cache_path).await;
+                    }
+                    db.replace_file_id(&task.file_id, &remote.id, remote.md5_checksum.as_deref(), mtime)?;
+                    db.complete_upload(task.id)?;
+                    done += 1;
+                }
+                "update" => {
+                    let item = db.by_id(&task.file_id)?.context("elemento no encontrado")?;
+                    let local_path = cache.path(&task.file_id);
+                    if local_path.exists() {
+                        let data = tokio::fs::read(&local_path).await?;
+                        let data_len = data.len() as u64;
+                        info!("subiendo cambios de '{}' ({data_len} bytes)", item.name);
+                        let remote = drive.update_remote_file(&task.file_id, &item.mime, data).await?;
+                        let mtime = remote.modified_time.as_deref().and_then(crate::db::parse_rfc3339).unwrap_or(0);
+                        db.update_item_size_mtime(&task.file_id, data_len, mtime)?;
+                    }
+                    db.complete_upload(task.id)?;
+                    done += 1;
+                }
+                "mkdir" => {
+                    let item = db.by_id(&task.file_id)?.context("carpeta local no encontrada")?;
+                    let parent_id = item.parent_id.as_deref().unwrap_or("root");
+                    info!("creando carpeta remota '{}'", item.name);
+                    let remote = drive.create_remote_folder(&item.name, parent_id).await?;
+                    let mtime = remote.modified_time.as_deref().and_then(crate::db::parse_rfc3339).unwrap_or(0);
+                    db.replace_file_id(&task.file_id, &remote.id, None, mtime)?;
+                    db.complete_upload(task.id)?;
+                    done += 1;
+                }
+                "trash" => {
+                    info!("enviando a la papelera '{}'", task.file_id);
+                    if !task.file_id.starts_with("local_") {
+                        let _ = drive.trash_remote_file(&task.file_id).await;
+                    }
+                    db.complete_upload(task.id)?;
+                    done += 1;
+                }
+                "rename" => {
+                    if let Some(payload) = &task.payload {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
+                            if let Some(new_name) = v.get("name").and_then(|n| n.as_str()) {
+                                if !task.file_id.starts_with("local_") {
+                                    let _ = drive.rename_remote_file(&task.file_id, new_name).await;
+                                }
+                            }
+                        }
+                    }
+                    db.complete_upload(task.id)?;
+                    done += 1;
+                }
+                "move" => {
+                    if let Some(payload) = &task.payload {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
+                            if let (Some(new_parent), Some(old_parent)) = (
+                                v.get("new_parent").and_then(|n| n.as_str()),
+                                v.get("old_parent").and_then(|n| n.as_str()),
+                            ) {
+                                if !task.file_id.starts_with("local_") {
+                                    let _ = drive.move_remote_file(&task.file_id, new_parent, old_parent).await;
+                                }
+                            }
+                        }
+                    }
+                    db.complete_upload(task.id)?;
+                    done += 1;
+                }
+                _ => {
+                    db.complete_upload(task.id)?;
+                }
+            }
+            Ok(())
+        }.await;
+
+        if let Err(e) = res {
+            tracing::warn!("error procesando subida de tarea #{}: {e:#}", task.id);
+            let _ = db.update_upload_status(task.id, "pending", Some(&e.to_string()));
+        }
+    }
+    Ok(done)
+}

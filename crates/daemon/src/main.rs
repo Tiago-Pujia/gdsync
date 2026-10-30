@@ -9,12 +9,13 @@ use gdsync_core::db::Db;
 use gdsync_core::drive::Drive;
 use gdsync_core::sync;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-/// gdsync daemon: mounts Google Drive as a folder.
+/// gdsync daemon: mounts Google Drive as a local folder with on-demand caching and bidirectional sync.
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -28,7 +29,7 @@ fn prepare_mountpoint(path: &Path) -> Result<()> {
     if let Err(e) = std::fs::metadata(path) {
         if e.raw_os_error() == Some(libc::ENOTCONN) {
             warn!("punto de montaje colgado, desmontando {}", path.display());
-            std::process::Command::new("fusermount3").arg("-uz").arg(path).status()?;
+            let _ = std::process::Command::new("fusermount3").arg("-uz").arg(path).status();
         }
     }
     std::fs::create_dir_all(path).with_context(|| format!("no se pudo crear {}", path.display()))
@@ -52,19 +53,49 @@ fn main() -> Result<()> {
         cfg.cache_max_gb * 1024 * 1024 * 1024,
     )?);
 
+    let total_space = Arc::new(AtomicU64::new(15 * 1024 * 1024 * 1024)); // 15 GB default
+    let used_space = Arc::new(AtomicU64::new(0));
+
+    // Try fetching initial quota from Drive
+    if let Ok((used, total)) = rt.block_on(drive.about_storage()) {
+        total_space.store(total, Ordering::Relaxed);
+        used_space.store(used, Ordering::Relaxed);
+    }
+
     rt.block_on(sync::initial_sync(&drive, &db, &cfg))?;
 
+    // Background worker: upload queue + remote changes polling + quota refresh
     {
         let (drive, db, cache, cfg_clone) = (drive.clone(), db.clone(), cache.clone(), cfg.clone());
+        let (total_s, used_s) = (total_space.clone(), used_space.clone());
         let every = Duration::from_secs(cfg.poll_interval_secs.max(5));
+
         rt.spawn(async move {
+            let mut tick = 0u64;
             loop {
+                // 1. Process pending local uploads first
+                match sync::process_upload_queue(&drive, &db, &cache).await {
+                    Ok(0) => {}
+                    Ok(n) => info!("{n} tareas locales subidas a Drive"),
+                    Err(e) => warn!("error procesando cola de subida: {e:#}"),
+                }
+
+                // 2. Poll remote changes
                 match sync::poll_changes(&drive, &db, &cache, &cfg_clone).await {
                     Ok(0) => {}
                     Ok(n) => info!("{n} cambios remotos aplicados"),
-                    // Offline or API hiccup: keep serving from the local state.
-                    Err(e) => warn!("no se pudieron consultar cambios: {e:#}"),
+                    Err(e) => warn!("no se pudieron consultar cambios remotos: {e:#}"),
                 }
+
+                // 3. Refresh storage quota every ~5 minutes
+                tick += 1;
+                if tick % 10 == 0 {
+                    if let Ok((used, total)) = drive.about_storage().await {
+                        total_s.store(total, Ordering::Relaxed);
+                        used_s.store(used, Ordering::Relaxed);
+                    }
+                }
+
                 tokio::time::sleep(every).await;
             }
         });
@@ -74,14 +105,14 @@ fn main() -> Result<()> {
     let options = [
         MountOption::FSName("gdsync".into()),
         MountOption::Subtype("gdsync".into()),
-        MountOption::RO,
+        MountOption::RW,
         MountOption::NoAtime,
         MountOption::DefaultPermissions,
     ];
-    let fs = fs::DriveFs::new(db, cache, rt.handle().clone());
+    let fs = fs::DriveFs::new(db, cache, rt.handle().clone(), total_space, used_space);
     let session = fuser::spawn_mount2(fs, &mount, &options)
         .with_context(|| format!("no se pudo montar en {}", mount.display()))?;
-    info!("Google Drive montado en {}", mount.display());
+    info!("Google Drive montado en modo lectura/escritura en {}", mount.display());
 
     rt.block_on(async {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;

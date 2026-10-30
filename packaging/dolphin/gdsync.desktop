@@ -1,0 +1,31 @@
+[Desktop Entry]
+Type=Service
+MimeType=all/allfiles;inode/directory;
+Actions=Pin;Unpin;OpenWeb;CopyLink;
+X-KDE-Submenu=Google Drive (gdsync)
+X-KDE-Priority=TopLevel
+Icon=folder-gdrive
+
+[Desktop Action Pin]
+Name=Mantener siempre en este equipo (Disponible sin conexión)
+Name[es]=Mantener siempre en este equipo (Disponible sin conexión)
+Icon=emblem-checked
+Exec=gdsync pin %F
+
+[Desktop Action Unpin]
+Name=Liberar espacio local (Solo en la nube)
+Name[es]=Liberar espacio local (Solo en la nube)
+Icon=folder-cloud
+Exec=gdsync unpin %F
+
+[Desktop Action OpenWeb]
+Name=Abrir en Google Drive (Web)
+Name[es]=Abrir en Google Drive (Web)
+Icon=internet-web-browser
+Exec=gdsync open-web %F
+
+[Desktop Action CopyLink]
+Name=Copiar enlace para compartir
+Name[es]=Copiar enlace para compartir
+Icon=edit-copy
+Exec=gdsync copy-link %F

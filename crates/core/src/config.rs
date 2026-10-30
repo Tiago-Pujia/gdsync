@@ -69,6 +69,9 @@ impl Config {
         })?;
         Ok(serde_json::from_str(&s)?)
     }
+    pub fn load_or_default() -> Self {
+        Self::load().unwrap_or_else(|_| Self::new(String::new(), String::new()))
+    }
     pub fn save(&self) -> Result<()> {
         write_private(&Self::path(), &serde_json::to_vec_pretty(self)?)
     }
@@ -159,5 +162,25 @@ mod tests {
         assert!(!cfg.is_syncing_all());
         cfg.reset_sync_folders();
         assert!(cfg.is_syncing_all());
+    }
+
+    #[test]
+    fn test_config_serialization_and_defaults() {
+        let json = r#"{
+            "client_id": "foo",
+            "client_secret": "bar"
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.client_id, "foo");
+        assert_eq!(cfg.client_secret, "bar");
+        assert_eq!(cfg.poll_interval_secs, 30);
+        assert_eq!(cfg.cache_max_gb, 10);
+        assert_eq!(cfg.sync_folders, vec!["root".to_string()]);
+        assert!(cfg.is_syncing_all());
+
+        let serialized = serde_json::to_string(&cfg).unwrap();
+        let parsed: Config = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(parsed.client_id, "foo");
+        assert_eq!(parsed.cache_max_gb, 10);
     }
 }

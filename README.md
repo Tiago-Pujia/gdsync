@@ -1,90 +1,160 @@
 # gdsync
 
-Google Drive en tu gestor de archivos (Linux, KDE primero), en **modo híbrido**:
-ves todo tu Drive como una carpeta (`~/GoogleDrive`) y cada archivo se descarga
-recién cuando lo abrís.
+Cliente híbrido y bidireccional de **Google Drive para Linux** (con integración nativa en KDE Plasma / Dolphin y compatible con GNOME y otros entornos de escritorio).
 
-> Estado: **fases 0–2** del plan. El montaje es de **solo lectura**: podés navegar, abrir
-> archivos (se descargan y quedan en caché) y los cambios hechos en la web aparecen
-> solos. Escritura, "Disponible sin conexión" e íconos en Dolphin vienen en las fases siguientes.
+Permite visualizar y gestionar todo tu almacenamiento en la nube directamente desde tu gestor de archivos (por defecto en `~/GoogleDrive` o la ruta que elijas):
+- **Modo híbrido bajo demanda:** Navegá por todo tu Drive al instante. Los archivos ocupan 0 bytes locales hasta que decidís abrirlos.
+- **Sincronización bidireccional:** Creá, editá, renombrá o enviá archivos a la papelera desde tu gestor de archivos local. Las modificaciones se sincronizan automáticamente con la nube mediante una cola persistente.
+- **Disponible sin conexión (Pinning):** Marcá archivos o carpetas para tenerlos siempre disponibles offline con un clic derecho en Dolphin o mediante CLI.
+- **Sincronización selectiva:** Elegí si querés sincronizar toda tu unidad o únicamente las carpetas que te interesan.
+- **Integración con KDE Dolphin:** Menú contextual integrado (*ServiceMenu*) para anclar archivos, abrir en Drive Web y copiar enlaces compartibles.
+- **Interfaz gráfica nativa (PyQt6):** Monitor de cuotas de almacenamiento, control del daemon, árbol de sincronización selectiva y configuración visual con ícono en la bandeja del sistema (*System Tray*).
+- **Google Docs / Sheets / Slides:** Se integran como archivos `.desktop` nativos que abren el documento en tu navegador al hacer doble clic.
+
+---
 
 ## Requisitos
 
+- **Linux** (probado y optimizado para Ubuntu / Debian / Fedora / Arch con KDE Plasma 5 o 6).
+- **fuse3** (`fusermount3`).
+- **Python 3 con PyQt6** (para la interfaz gráfica): `sudo apt install python3-pyqt6`
+- **Rust y compilador C** (para compilar desde el código fuente).
+
+---
+
+## 1. Configuración de credenciales de Google (una sola vez)
+
+1. Ingresá a la [Consola de Google Cloud](https://console.cloud.google.com/) y creá un proyecto (ej. `gdsync`).
+2. En **APIs y servicios → Biblioteca**, buscá y habilitá **Google Drive API**.
+3. En **APIs y servicios → Pantalla de consentimiento de OAuth**:
+   - Elegí tipo **Externo**, completá nombre de app y correo de contacto.
+   - En **Usuarios de prueba**, agregá tu cuenta de Google (correo @gmail.com).
+4. En **Credenciales → Crear credenciales → ID de cliente de OAuth**:
+   - Tipo de aplicación: **App de escritorio**.
+   - Descargá o copiá el **Client ID** y el **Client Secret**.
+
+---
+
+## 2. Instalación rápida
+
+Podés instalar automáticamente los binarios, el menú de Dolphin, el lanzador de escritorio y el servicio systemd ejecutando:
+
 ```bash
-sudo apt install build-essential fuse3      # compilador C (sqlite, TLS) y fusermount3
-curl https://sh.rustup.rs -sSf | sh          # Rust
+git clone https://github.com/tu-usuario/gdsync.git
+cd gdsync
+./install.sh
 ```
 
-## 1. Crear tu credencial de Google (una sola vez)
+El instalador dejará listos en tu usuario (`~/.local/bin`):
+- `gdsync`: Herramienta de línea de comandos.
+- `gdsyncd`: Servicio daemon en segundo plano (FUSE + sincronización).
+- `gdsync-gui`: Interfaz gráfica de usuario con monitor y bandeja de sistema.
 
-1. Entrá a <https://console.cloud.google.com/> y creá un proyecto (por ejemplo `gdsync`).
-2. **APIs y servicios → Biblioteca**: habilitá **Google Drive API**.
-3. **APIs y servicios → Pantalla de consentimiento de OAuth**: tipo **Externo**, completá
-   nombre y correo, y en **Usuarios de prueba** agregá tu cuenta de Google.
-4. **Credenciales → Crear credenciales → ID de cliente de OAuth → App de escritorio**.
-   Copiá el *Client ID* y el *Client secret*.
+---
 
-> [!TIP]
-> Mientras desarrollamos, usá una **cuenta de Google de prueba**.
+## 3. Uso y Primeros Pasos
 
-## 2. Compilar e instalar
-
-```bash
-cargo install --path crates/cli      # gdsync
-cargo install --path crates/daemon   # gdsyncd
-```
-
-## 3. Iniciar sesión y montar
+### A. Iniciar sesión
 
 ```bash
 gdsync login --client-id TU_CLIENT_ID --client-secret TU_CLIENT_SECRET
-gdsync ls          # prueba rápida: lista la raíz de tu Drive
-gdsyncd            # monta en ~/GoogleDrive (Ctrl-C para desmontar)
 ```
+Se abrirá automáticamente tu navegador para autorizar la aplicación de forma segura con OAuth 2.0 PKCE.
 
-Para que se monte solo al iniciar sesión:
+### B. Iniciar el servicio y montar Drive
 
+Podés iniciar el daemon directamente en la terminal:
 ```bash
-mkdir -p ~/.config/systemd/user
-cp packaging/systemd/gdsyncd.service ~/.config/systemd/user/
+gdsyncd
+```
+O iniciarlo como servicio en segundo plano con **systemd**:
+```bash
+systemctl --user daemon-reload
 systemctl --user enable --now gdsyncd
-journalctl --user -u gdsyncd -f      # ver el log
 ```
 
-Excluí la carpeta del indexador de KDE para que no intente leer todo:
+Para revisar el estado o los registros:
+```bash
+gdsync status
+journalctl --user -u gdsyncd -f
+```
+
+### C. Abrir la Interfaz Gráfica (GUI)
+
+Podés abrir la aplicación desde el menú de inicio de tu sistema buscando `gdsync`, o mediante el comando:
+```bash
+gdsync gui
+```
+
+La GUI te permite:
+- Ver el estado del servicio en vivo y montarlo / desmontarlo con un botón.
+- Monitorear el espacio total de Google Drive y el tamaño ocupado por la caché local.
+- Seleccionar carpetas específicas para sincronización selectiva con casillas de verificación.
+- Ajustar la ruta de montaje local (`~/GoogleDrive` o cualquier otra carpeta) y límites de caché.
+- Minimizarse en la bandeja del sistema (*System Tray*).
+
+---
+
+## 4. Integración con Dolphin (KDE)
+
+Al hacer clic derecho sobre cualquier archivo o carpeta dentro de tu unidad montada, encontrarás el submenú **Google Drive (gdsync)** con las siguientes acciones:
+
+- 📌 **Mantener siempre en este equipo (Disponible sin conexión):** Descarga el archivo de inmediato y garantiza que el algoritmo de limpieza de caché nunca lo elimine.
+- ☁️ **Liberar espacio local (Solo en la nube):** Permite que el archivo pueda ser liberado de la caché local cuando sea necesario.
+- 🌐 **Abrir en Google Drive (Web):** Abre el elemento directamente en la interfaz web de Drive en tu navegador predeterminado.
+- 📋 **Copiar enlace para compartir:** Copia la URL de Google Drive directa al portapapeles.
+
+---
+
+## 5. Referencia de Comandos CLI
+
+| Comando | Descripción |
+|---|---|
+| `gdsync login` | Inicia sesión con OAuth 2.0 PKCE |
+| `gdsync status` | Muestra el estado del daemon, cuota de Drive, caché y cola de subida |
+| `gdsync ls [carpeta]` | Lista elementos remotos directamente desde la API |
+| `gdsync pin <ruta>` | Marca un archivo o carpeta como disponible sin conexión |
+| `gdsync unpin <ruta>` | Desmarca un archivo o carpeta del modo sin conexión |
+| `gdsync open-web <ruta>` | Abre el elemento local en la versión web de Google Drive |
+| `gdsync copy-link <ruta>` | Copia el enlace web del elemento al portapapeles |
+| `gdsync folder list-remote` | Lista todas las carpetas remotas disponibles en tu Drive |
+| `gdsync folder list` | Muestra las carpetas seleccionadas para sincronización |
+| `gdsync folder add <nombre>` | Agrega una carpeta a la sincronización selectiva |
+| `gdsync folder remove <nombre>` | Quita una carpeta de la sincronización selectiva |
+| `gdsync folder reset` | Restablece la sincronización a toda la unidad (`root`) |
+| `gdsync config show` | Muestra la configuración actual |
+| `gdsync config set-mount <path>` | Cambia el punto de montaje local |
+| `gdsync config set-cache <gb>` | Configura el tamaño máximo de la caché local en GB |
+| `gdsync config set-poll <seg>` | Configura el intervalo de sondeo de cambios remotos |
+| `gdsync gui` | Lanza la interfaz gráfica de usuario |
+| `gdsync resync` | Limpia la base de datos local y la caché (con el daemon detenido) |
+| `gdsync logout` | Cierra la sesión activa y revoca las credenciales |
+
+---
+
+## 6. Dónde se guardan los datos
+
+| Tipo de dato | Ubicación estándar |
+|---|---|
+| Configuración y credenciales | `~/.config/gdsync/config.json` y `token.json` (permisos seguros `0600`) |
+| Base de datos local (SQLite) | `~/.local/share/gdsync/state.db` |
+| Archivos cacheados | `~/.cache/gdsync/blobs/` |
+| Menú contextual de Dolphin | `~/.local/share/kio/servicemenus/gdsync.desktop` |
+| Lanzador de escritorio | `~/.local/share/applications/gdsync.desktop` |
+| Servicio systemd | `~/.config/systemd/user/gdsyncd.service` |
+
+---
+
+## 7. Desinstalación
+
+Para desinstalar completamente el cliente y remover los accesos del sistema:
 
 ```bash
-balooctl6 config add excludeFolders ~/GoogleDrive
+./uninstall.sh
 ```
 
-## Comandos
+---
 
-| Comando | Qué hace |
-|---|---|
-| `gdsync login` | Inicia sesión (la primera vez con `--client-id`/`--client-secret`) |
-| `gdsync ls` | Lista la raíz de Drive directamente desde la API |
-| `gdsync status` | Punto de montaje, sesión, cantidad de elementos y uso de caché |
-| `gdsync logout` | Cierra sesión y revoca el acceso |
-| `gdsync resync` | Borra el estado local (con el daemon detenido) |
+## Licencia
 
-## Dónde guarda cosas
-
-| Qué | Dónde |
-|---|---|
-| Configuración y token | `~/.config/gdsync/` (archivos `0600`) |
-| Árbol de Drive (SQLite) | `~/.local/share/gdsync/state.db` |
-| Contenido descargado | `~/.cache/gdsync/blobs/` (límite: `cache_max_gb` en `config.json`, por defecto 10) |
-
-## Cómo se ven las cosas
-
-- **Google Docs/Sheets/Slides**: aparecen como `Nombre.gdoc.desktop` (o `.gsheet`, `.gslides`…). Al abrirlos se abren en el navegador.
-- **Nombres repetidos** en una carpeta: `foto.jpg`, `foto (2).jpg`…
-- **`/` en un nombre**: se muestra como `∕`.
-- Los **atajos** de Drive todavía no se muestran.
-
-## Desarrollo
-
-```bash
-cargo test
-RUST_LOG=debug cargo run -p gdsyncd
-```
+Este proyecto está distribuido bajo la licencia [GPL-3.0](LICENSE).

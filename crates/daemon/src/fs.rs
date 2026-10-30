@@ -1,16 +1,17 @@
-//! FUSE filesystem: the Drive tree served from SQLite, content from the cache.
-//! Phase 1: read-only.
+//! FUSE filesystem: the Drive tree served from SQLite with local on-demand caching
+//! and bidirectional read/write operations (local edits, creation, trash, renames).
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
-    ReplyOpen, Request,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request,
 };
 use gdsync_core::cache::Cache;
 use gdsync_core::db::{Db, Item, ROOT_INO};
+use gdsync_core::drive::FOLDER_MIME;
 use gdsync_core::names::{desktop_link, local_entries};
-use libc::{EACCES, EBADF, EIO, EISDIR, ENOENT, ENOTDIR, EROFS};
+use libc::{EACCES, EBADF, EEXIST, EIO, EISDIR, ENODATA, ENOENT, ENOTDIR, ENOTEMPTY, ERANGE};
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,6 +23,7 @@ const TTL: Duration = Duration::from_secs(1);
 
 enum OpenFile {
     Disk(File),
+    DiskRw { file: File, item_id: String, dirty: bool },
     Mem(Vec<u8>),
 }
 
@@ -33,10 +35,18 @@ pub struct DriveFs {
     next_fh: Arc<AtomicU64>,
     uid: u32,
     gid: u32,
+    total_space: Arc<AtomicU64>,
+    used_space: Arc<AtomicU64>,
 }
 
 impl DriveFs {
-    pub fn new(db: Arc<Db>, cache: Arc<Cache>, rt: Handle) -> Self {
+    pub fn new(
+        db: Arc<Db>,
+        cache: Arc<Cache>,
+        rt: Handle,
+        total_space: Arc<AtomicU64>,
+        used_space: Arc<AtomicU64>,
+    ) -> Self {
         // SAFETY: getuid/getgid have no preconditions.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
         Self {
@@ -47,6 +57,8 @@ impl DriveFs {
             next_fh: Arc::new(AtomicU64::new(1)),
             uid,
             gid,
+            total_space,
+            used_space,
         }
     }
 
@@ -156,6 +168,42 @@ impl Filesystem for DriveFs {
         }
     }
 
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<std::time::SystemTime>,
+        fh: Option<u64>,
+        _crtime: Option<std::time::SystemTime>,
+        _chgtime: Option<std::time::SystemTime>,
+        _bkuptime: Option<std::time::SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        let Some(item) = self.item(ino) else { return reply.error(ENOENT) };
+        if let Some(new_size) = size {
+            let path = self.cache.path(&item.id);
+            if let Some(h) = fh {
+                let handles = self.handles.lock().unwrap();
+                if let Some(OpenFile::DiskRw { file, .. }) = handles.get(&h) {
+                    let _ = file.set_len(new_size);
+                }
+            } else if path.exists() {
+                let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_len(new_size));
+            }
+            let _ = self.db.update_item_size_mtime(&item.id, new_size, gdsync_core::now());
+            let _ = self.db.enqueue_upload(&item.id, "update", None);
+        }
+        let updated = self.item(ino).unwrap_or(item);
+        reply.attr(&TTL, &self.attr(&updated));
+    }
+
     fn readdir(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
         let Some(dir) = self.item(ino) else { return reply.error(ENOENT) };
         if !dir.is_dir() {
@@ -166,7 +214,10 @@ impl Filesystem for DriveFs {
             .as_deref()
             .and_then(|p| self.db.by_id(p).ok().flatten())
             .map_or(ROOT_INO, |p| p.ino);
-        let mut list = vec![(ino, FileType::Directory, ".".to_string()), (parent_ino, FileType::Directory, "..".to_string())];
+        let mut list = vec![
+            (ino, FileType::Directory, ".".to_string()),
+            (parent_ino, FileType::Directory, "..".to_string()),
+        ];
         list.extend(self.entries(&dir).into_iter().map(|(n, i)| (i.ino, kind(&i), n)));
         for (i, (ino, kind, name)) in list.into_iter().enumerate().skip(offset as usize) {
             if reply.add(ino, (i + 1) as i64, kind, name) {
@@ -177,9 +228,6 @@ impl Filesystem for DriveFs {
     }
 
     fn open(&mut self, req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
-        if flags & libc::O_ACCMODE != libc::O_RDONLY {
-            return reply.error(EROFS);
-        }
         let Some(item) = self.item(ino) else { return reply.error(ENOENT) };
         if item.is_dir() {
             return reply.error(EISDIR);
@@ -188,31 +236,107 @@ impl Filesystem for DriveFs {
             let fh = self.new_handle(OpenFile::Mem(desktop_link(&item).into_bytes()));
             return reply.opened(fh, 0);
         }
-        if !self.cache.is_fresh(&item) && is_background_reader(req.pid()) {
+
+        let write_mode = (flags & libc::O_ACCMODE) != libc::O_RDONLY;
+        if !write_mode && !self.cache.is_fresh(&item) && is_background_reader(req.pid()) {
             debug!("bloqueada lectura en segundo plano de {} (pid {})", item.name, req.pid());
             return reply.error(EACCES);
         }
-        // Download off the FUSE thread so the rest of the filesystem stays responsive.
+
         let cache = self.cache.clone();
         let handles = self.handles.clone();
         let next_fh = self.next_fh.clone();
+        let item_id = item.id.clone();
+
         self.rt.spawn(async move {
-            let file = match cache.ensure(&item).await {
-                Ok(path) => File::open(path).map_err(anyhow::Error::from),
-                Err(e) => Err(e),
+            let path = match cache.ensure(&item).await {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("no se pudo asegurar {} en caché: {e:#}", item.name);
+                    return reply.error(EIO);
+                }
             };
-            match file {
+
+            let file_res = if write_mode {
+                OpenOptions::new().read(true).write(true).open(&path)
+            } else {
+                File::open(&path)
+            };
+
+            match file_res {
                 Ok(f) => {
                     let fh = next_fh.fetch_add(1, Ordering::Relaxed);
-                    handles.lock().unwrap().insert(fh, OpenFile::Disk(f));
+                    let handle = if write_mode {
+                        OpenFile::DiskRw { file: f, item_id, dirty: false }
+                    } else {
+                        OpenFile::Disk(f)
+                    };
+                    handles.lock().unwrap().insert(fh, handle);
                     reply.opened(fh, 0);
                 }
                 Err(e) => {
-                    warn!("no se pudo abrir {}: {e:#}", item.name);
-                    reply.error(EIO);
+                    warn!("error abriendo archivo en disco: {e:#}");
+                    reply.error(e.raw_os_error().unwrap_or(EIO));
                 }
             }
         });
+    }
+
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let Some(parent_item) = self.item(parent) else { return reply.error(ENOENT) };
+        if !parent_item.is_dir() {
+            return reply.error(ENOTDIR);
+        }
+        let name_str = name.to_string_lossy().to_string();
+        let rand_id: u64 = rand::random();
+        let local_id = format!("local_{rand_id:016x}");
+        let path = self.cache.path(&local_id);
+
+        let file = match OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path) {
+            Ok(f) => f,
+            Err(e) => return reply.error(e.raw_os_error().unwrap_or(EIO)),
+        };
+
+        let now = gdsync_core::now();
+        let ino = match self.db.insert_local_item(&local_id, Some(&parent_item.id), &name_str, "application/octet-stream", 0, now) {
+            Ok(i) => i,
+            Err(_) => return reply.error(EIO),
+        };
+        let _ = self.db.cache_put(&local_id, "local", 0);
+        let _ = self.db.enqueue_upload(&local_id, "create", None);
+
+        let fh = self.new_handle(OpenFile::DiskRw { file, item_id: local_id.clone(), dirty: true });
+        let Some(created_item) = self.item(ino) else { return reply.error(EIO) };
+        reply.created(&TTL, &self.attr(&created_item), 0, fh, 0);
+    }
+
+    fn mkdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, _mode: u32, _umask: u32, reply: ReplyEntry) {
+        let Some(parent_item) = self.item(parent) else { return reply.error(ENOENT) };
+        if !parent_item.is_dir() {
+            return reply.error(ENOTDIR);
+        }
+        let name_str = name.to_string_lossy().to_string();
+        let rand_id: u64 = rand::random();
+        let local_id = format!("local_folder_{rand_id:016x}");
+
+        let now = gdsync_core::now();
+        let ino = match self.db.insert_local_item(&local_id, Some(&parent_item.id), &name_str, FOLDER_MIME, 0, now) {
+            Ok(i) => i,
+            Err(_) => return reply.error(EIO),
+        };
+        let _ = self.db.enqueue_upload(&local_id, "mkdir", None);
+
+        let Some(created_item) = self.item(ino) else { return reply.error(EIO) };
+        reply.entry(&TTL, &self.attr(&created_item), 0);
     }
 
     fn read(
@@ -228,7 +352,7 @@ impl Filesystem for DriveFs {
     ) {
         let handles = self.handles.lock().unwrap();
         match handles.get(&fh) {
-            Some(OpenFile::Disk(f)) => {
+            Some(OpenFile::Disk(f)) | Some(OpenFile::DiskRw { file: f, .. }) => {
                 let mut buf = vec![0u8; size as usize];
                 match read_full_at(f, &mut buf, offset as u64) {
                     Ok(n) => reply.data(&buf[..n]),
@@ -244,6 +368,46 @@ impl Filesystem for DriveFs {
         }
     }
 
+    fn write(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyWrite,
+    ) {
+        let mut handles = self.handles.lock().unwrap();
+        match handles.get_mut(&fh) {
+            Some(OpenFile::DiskRw { file, item_id, dirty }) => {
+                if let Err(e) = file.write_all_at(data, offset as u64) {
+                    return reply.error(e.raw_os_error().unwrap_or(EIO));
+                }
+                *dirty = true;
+                let new_size = file.metadata().map(|m| m.len()).unwrap_or(offset as u64 + data.len() as u64);
+                let _ = self.db.update_item_size_mtime(item_id, new_size, gdsync_core::now());
+                reply.written(data.len() as u32);
+            }
+            Some(OpenFile::Disk(_)) => reply.error(EACCES),
+            Some(OpenFile::Mem(_)) => reply.error(EACCES),
+            None => reply.error(EBADF),
+        }
+    }
+
+    fn flush(&mut self, _req: &Request<'_>, _ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        let mut handles = self.handles.lock().unwrap();
+        if let Some(OpenFile::DiskRw { item_id, dirty, .. }) = handles.get_mut(&fh) {
+            if *dirty {
+                let _ = self.db.enqueue_upload(item_id, "update", None);
+                *dirty = false;
+            }
+        }
+        reply.ok();
+    }
+
     fn release(
         &mut self,
         _req: &Request<'_>,
@@ -254,7 +418,172 @@ impl Filesystem for DriveFs {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        self.handles.lock().unwrap().remove(&fh);
+        let mut handles = self.handles.lock().unwrap();
+        if let Some(OpenFile::DiskRw { item_id, dirty, .. }) = handles.remove(&fh) {
+            if dirty {
+                let _ = self.db.enqueue_upload(&item_id, "update", None);
+            }
+        }
         reply.ok();
+    }
+
+    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let Some(parent_item) = self.item(parent) else { return reply.error(ENOENT) };
+        let name_str = name.to_string_lossy();
+        let target = self
+            .entries(&parent_item)
+            .into_iter()
+            .find(|(n, _)| n == &name_str)
+            .map(|(_, item)| item);
+
+        let Some(item) = target else { return reply.error(ENOENT) };
+        if item.is_dir() {
+            return reply.error(EISDIR);
+        }
+
+        let _ = self.db.remove(&item.id);
+        self.cache.forget(&item.id);
+        let _ = self.db.enqueue_upload(&item.id, "trash", None);
+        reply.ok();
+    }
+
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let Some(parent_item) = self.item(parent) else { return reply.error(ENOENT) };
+        let name_str = name.to_string_lossy();
+        let target = self
+            .entries(&parent_item)
+            .into_iter()
+            .find(|(n, _)| n == &name_str)
+            .map(|(_, item)| item);
+
+        let Some(item) = target else { return reply.error(ENOENT) };
+        if !item.is_dir() {
+            return reply.error(ENOTDIR);
+        }
+
+        let children = self.db.children(&item.id).unwrap_or_default();
+        if !children.is_empty() {
+            return reply.error(ENOTEMPTY);
+        }
+
+        let _ = self.db.remove(&item.id);
+        let _ = self.db.enqueue_upload(&item.id, "trash", None);
+        reply.ok();
+    }
+
+    fn rename(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: ReplyEmpty,
+    ) {
+        let Some(parent_item) = self.item(parent) else { return reply.error(ENOENT) };
+        let Some(newparent_item) = self.item(newparent) else { return reply.error(ENOENT) };
+        if !newparent_item.is_dir() {
+            return reply.error(ENOTDIR);
+        }
+
+        let name_str = name.to_string_lossy();
+        let newname_str = newname.to_string_lossy().to_string();
+
+        let target = self
+            .entries(&parent_item)
+            .into_iter()
+            .find(|(n, _)| n == &name_str)
+            .map(|(_, item)| item);
+
+        let Some(item) = target else { return reply.error(ENOENT) };
+
+        // Check if destination already exists
+        if let Ok(Some(existing)) = self.db.lookup_child(&newparent_item.id, &newname_str) {
+            if existing.id != item.id {
+                return reply.error(EEXIST);
+            }
+        }
+
+        let moved_parent = if parent != newparent { Some(newparent_item.id.as_str()) } else { None };
+        if let Err(_) = self.db.rename_item(&item.id, &newname_str, moved_parent) {
+            return reply.error(EIO);
+        }
+
+        if item.name != newname_str {
+            let payload = serde_json::json!({ "name": newname_str }).to_string();
+            let _ = self.db.enqueue_upload(&item.id, "rename", Some(&payload));
+        }
+        if parent != newparent {
+            let payload = serde_json::json!({
+                "new_parent": newparent_item.id,
+                "old_parent": parent_item.id,
+            }).to_string();
+            let _ = self.db.enqueue_upload(&item.id, "move", Some(&payload));
+        }
+
+        reply.ok();
+    }
+
+    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
+        let total = self.total_space.load(Ordering::Relaxed);
+        let used = self.used_space.load(Ordering::Relaxed);
+        let free = total.saturating_sub(used);
+        let bsize = 4096u32;
+        let blocks = total / bsize as u64;
+        let bfree = free / bsize as u64;
+        let files = self.db.count_items().unwrap_or(1000);
+        reply.statfs(blocks, bfree, bfree, files, 1_000_000, bsize, 255, bsize);
+    }
+
+    fn getxattr(&mut self, _req: &Request<'_>, ino: u64, name: &OsStr, size: u32, reply: ReplyXattr) {
+        let Some(item) = self.item(ino) else { return reply.error(ENOENT) };
+        let name_str = name.to_string_lossy();
+        let value = match name_str.as_ref() {
+            "user.gdsync.pinned" => (if item.pinned { "1" } else { "0" }).as_bytes().to_vec(),
+            "user.gdsync.status" => {
+                let status = if item.pinned {
+                    "pinned"
+                } else if self.cache.is_fresh(&item) {
+                    "synced"
+                } else {
+                    "cloud_only"
+                };
+                status.as_bytes().to_vec()
+            }
+            _ => return reply.error(ENODATA),
+        };
+
+        if size == 0 {
+            reply.size(value.len() as u32);
+        } else if size >= value.len() as u32 {
+            reply.data(&value);
+        } else {
+            reply.error(ERANGE);
+        }
+    }
+
+    fn setxattr(&mut self, _req: &Request<'_>, ino: u64, name: &OsStr, value: &[u8], _flags: i32, _position: u32, reply: ReplyEmpty) {
+        let Some(item) = self.item(ino) else { return reply.error(ENOENT) };
+        let name_str = name.to_string_lossy();
+        match name_str.as_ref() {
+            "user.gdsync.pinned" => {
+                let pin = value == b"1" || value == b"true";
+                let _ = self.db.set_pinned(&item.id, pin);
+                reply.ok();
+            }
+            _ => reply.error(ENODATA),
+        }
+    }
+
+    fn listxattr(&mut self, _req: &Request<'_>, _ino: u64, size: u32, reply: ReplyXattr) {
+        let attrs = b"user.gdsync.pinned\0user.gdsync.status\0";
+        if size == 0 {
+            reply.size(attrs.len() as u32);
+        } else if size >= attrs.len() as u32 {
+            reply.data(attrs);
+        } else {
+            reply.error(ERANGE);
+        }
     }
 }

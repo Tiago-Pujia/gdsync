@@ -1,12 +1,14 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use gdsync_core::auth::{self, Token};
+use gdsync_core::cache::Cache;
 use gdsync_core::config::{cache_dir, db_path, Config};
-use gdsync_core::db::Db;
+use gdsync_core::db::{Db, Item};
 use gdsync_core::drive::{Drive, FOLDER_MIME};
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// gdsync: Google Drive en tu gestor de archivos.
 #[derive(Parser)]
@@ -44,6 +46,28 @@ enum Cmd {
         #[command(subcommand)]
         sub: Option<ConfigCmd>,
     },
+    /// Marca un archivo o carpeta como "Disponible sin conexión" (no se borra de la caché).
+    Pin {
+        /// Ruta al archivo o carpeta
+        path: PathBuf,
+    },
+    /// Desmarca un archivo o carpeta de "Disponible sin conexión" (liberable de la caché).
+    Unpin {
+        /// Ruta al archivo o carpeta
+        path: PathBuf,
+    },
+    /// Abre el archivo o carpeta seleccionado en la versión web de Google Drive.
+    OpenWeb {
+        /// Ruta al archivo o carpeta
+        path: PathBuf,
+    },
+    /// Copia el enlace web de Google Drive al portapapeles.
+    CopyLink {
+        /// Ruta al archivo o carpeta
+        path: PathBuf,
+    },
+    /// Abre la interfaz gráfica de usuario (GUI).
+    Gui,
     /// Cierra la sesión activa y revoca el token en Google.
     Logout,
     /// Borra la base de datos local y la caché (ejecutar con el daemon detenido).
@@ -283,7 +307,7 @@ async fn main() -> Result<()> {
         },
 
         Cmd::Config { sub } => {
-            let mut cfg = Config::load().context("no hay configuración creada; ejecutá `gdsync login`")?;
+            let mut cfg = Config::load_or_default();
             match sub {
                 None | Some(ConfigCmd::Show) => {
                     println!("=== Configuración de gdsync ===");
@@ -295,6 +319,9 @@ async fn main() -> Result<()> {
                         "Carpetas sinc.:       {}",
                         if cfg.is_syncing_all() { "Toda la unidad (root)".into() } else { format!("{:?}", cfg.sync_folders) }
                     );
+                    if cfg.client_id.is_empty() {
+                        println!("Sesión:               No configurada (ejecutá `gdsync login`)");
+                    }
                 }
                 Some(ConfigCmd::SetMount { path }) => {
                     cfg.mount_point = path;
@@ -320,6 +347,90 @@ async fn main() -> Result<()> {
             }
         }
 
+        Cmd::Pin { path } => {
+            let cfg = Config::load()?;
+            let db = Db::open(&db_path())?;
+            let item = resolve_item_from_input_path(&cfg, &db, &path)?;
+            db.set_pinned(&item.id, true)?;
+            println!("✓ '{}' marcado como disponible sin conexión.", item.name);
+            if !item.is_dir() {
+                let drive = Arc::new(Drive::new(cfg.clone())?);
+                let db_arc = Arc::new(Db::open(&db_path())?);
+                let cache = Cache::new(
+                    cache_dir().join("blobs"),
+                    db_arc,
+                    drive,
+                    cfg.cache_max_gb * 1024 * 1024 * 1024,
+                )?;
+                println!("  Descargando copia local a la caché...");
+                let _ = cache.ensure(&item).await?;
+                println!("  Descarga completada con éxito.");
+            }
+        }
+
+        Cmd::Unpin { path } => {
+            let cfg = Config::load()?;
+            let db = Db::open(&db_path())?;
+            let item = resolve_item_from_input_path(&cfg, &db, &path)?;
+            db.set_pinned(&item.id, false)?;
+            println!("✓ '{}' desmarcado de disponible sin conexión (espacio local liberable).", item.name);
+        }
+
+        Cmd::OpenWeb { path } => {
+            let cfg = Config::load()?;
+            let db = Db::open(&db_path())?;
+            let item = resolve_item_from_input_path(&cfg, &db, &path)?;
+            let url = item.web_link.unwrap_or_else(|| format!("https://drive.google.com/open?id={}", item.id));
+            println!("Abriendo en el navegador: {url}");
+            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+        }
+
+        Cmd::CopyLink { path } => {
+            let cfg = Config::load()?;
+            let db = Db::open(&db_path())?;
+            let item = resolve_item_from_input_path(&cfg, &db, &path)?;
+            let url = item.web_link.unwrap_or_else(|| format!("https://drive.google.com/open?id={}", item.id));
+            println!("{url}");
+            if let Ok(mut child) = std::process::Command::new("wl-copy").stdin(std::process::Stdio::piped()).spawn() {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(url.as_bytes());
+                }
+            } else if let Ok(mut child) = std::process::Command::new("xclip").arg("-selection").arg("clipboard").stdin(std::process::Stdio::piped()).spawn() {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(url.as_bytes());
+                }
+            }
+        }
+
+        Cmd::Gui => {
+            let mut candidates = vec![
+                gdsync_core::config::data_dir().join("gui/main.py"),
+                PathBuf::from("/usr/local/share/gdsync/gui/main.py"),
+                PathBuf::from("/usr/share/gdsync/gui/main.py"),
+            ];
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(parent) = exe.parent() {
+                    candidates.push(parent.join("../../src/gui/main.py"));
+                    candidates.push(parent.join("../src/gui/main.py"));
+                    candidates.push(parent.join("src/gui/main.py"));
+                    candidates.push(parent.join("gui/main.py"));
+                }
+            }
+            candidates.push(PathBuf::from("src/gui/main.py"));
+            candidates.push(PathBuf::from("/home/tiago/Proyectos/Google-Drive-Sincronico/src/gui/main.py"));
+
+            let script = candidates.into_iter().find(|p| p.exists());
+            if let Some(path) = script {
+                let mut child = std::process::Command::new("python3")
+                    .arg(&path)
+                    .spawn()
+                    .with_context(|| format!("falló al iniciar python3 {}", path.display()))?;
+                let _ = child.wait();
+            } else {
+                bail!("no se encontró el script de la interfaz gráfica. Podés ejecutarlo con: python3 src/gui/main.py");
+            }
+        }
+
         Cmd::Logout => {
             if let Ok(tok) = Token::load() {
                 let _ = auth::revoke(&tok).await;
@@ -337,4 +448,18 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn resolve_item_from_input_path(cfg: &Config, db: &Db, path: &Path) -> Result<Item> {
+    let rel = if path.is_absolute() {
+        if let Ok(r) = path.strip_prefix(&cfg.mount_point) {
+            r
+        } else {
+            path
+        }
+    } else {
+        path
+    };
+    db.resolve_relative_path(rel)?
+        .with_context(|| format!("no se encontró '{}' en Google Drive local", path.display()))
 }

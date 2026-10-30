@@ -67,6 +67,21 @@ struct StartPageToken {
     start_page_token: String,
 }
 
+const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageQuota {
+    limit: Option<String>,
+    usage: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AboutResponse {
+    storage_quota: Option<StorageQuota>,
+}
+
 pub struct Drive {
     http: reqwest::Client,
     cfg: Config,
@@ -92,12 +107,27 @@ impl Drive {
         Ok(t.access_token.clone())
     }
 
-    /// GET with auth, retrying on rate limits, server errors and transient network errors.
-    async fn get(&self, url: &str, query: &[(&str, &str)]) -> Result<reqwest::Response> {
+    async fn request_bytes(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        query: &[(&str, &str)],
+        body: Option<(Vec<u8>, String)>,
+    ) -> Result<reqwest::Response> {
         let mut delay = Duration::from_millis(500);
         for attempt in 0..6 {
             let last = attempt == 5;
-            let res = self.http.get(url).bearer_auth(self.bearer().await?).query(query).send().await;
+            let mut req = self
+                .http
+                .request(method.clone(), url)
+                .bearer_auth(self.bearer().await?)
+                .query(query);
+
+            if let Some((b, ct)) = &body {
+                req = req.header(reqwest::header::CONTENT_TYPE, ct.as_str()).body(b.clone());
+            }
+
+            let res = req.send().await;
             match res {
                 Ok(r) if r.status().is_success() => return Ok(r),
                 Ok(r) if r.status() == StatusCode::UNAUTHORIZED && !last => {
@@ -120,6 +150,20 @@ impl Drive {
             delay *= 2;
         }
         unreachable!()
+    }
+
+    async fn get(&self, url: &str, query: &[(&str, &str)]) -> Result<reqwest::Response> {
+        self.request_bytes(reqwest::Method::GET, url, query, None).await
+    }
+
+    async fn post_json(&self, url: &str, query: &[(&str, &str)], body: &serde_json::Value) -> Result<reqwest::Response> {
+        let bytes = serde_json::to_vec(body)?;
+        self.request_bytes(reqwest::Method::POST, url, query, Some((bytes, "application/json".into()))).await
+    }
+
+    async fn patch_json(&self, url: &str, query: &[(&str, &str)], body: &serde_json::Value) -> Result<reqwest::Response> {
+        let bytes = serde_json::to_vec(body)?;
+        self.request_bytes(reqwest::Method::PATCH, url, query, Some((bytes, "application/json".into()))).await
     }
 
     pub async fn get_file(&self, id: &str) -> Result<RemoteFile> {
@@ -241,5 +285,88 @@ impl Drive {
         drop(f);
         tokio::fs::rename(&tmp, dest).await?;
         Ok(())
+    }
+
+    /// Query Drive storage quota: returns (used_bytes, total_limit_bytes).
+    pub async fn about_storage(&self) -> Result<(u64, u64)> {
+        let resp = self.get(&format!("{API}/about"), &[("fields", "storageQuota")]).await?;
+        let about: AboutResponse = resp.json().await?;
+        let quota = about.storage_quota.unwrap_or(StorageQuota { limit: None, usage: None });
+        let usage = quota.usage.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let limit = quota.limit.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(10 * 1024 * 1024 * 1024 * 1024); // 10 TB fallback if unlimited
+        Ok((usage, limit))
+    }
+
+    /// Creates a folder in Drive.
+    pub async fn create_remote_folder(&self, name: &str, parent_id: &str) -> Result<RemoteFile> {
+        let body = serde_json::json!({
+            "name": name,
+            "parents": [parent_id],
+            "mimeType": FOLDER_MIME
+        });
+        let resp = self.post_json(&format!("{API}/files"), &[("fields", FILE_FIELDS)], &body).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Moves a file to Google Drive trash.
+    pub async fn trash_remote_file(&self, file_id: &str) -> Result<()> {
+        let body = serde_json::json!({ "trashed": true });
+        self.patch_json(&format!("{API}/files/{file_id}"), &[], &body).await?;
+        Ok(())
+    }
+
+    /// Renames a remote file or folder.
+    pub async fn rename_remote_file(&self, file_id: &str, new_name: &str) -> Result<RemoteFile> {
+        let body = serde_json::json!({ "name": new_name });
+        let resp = self.patch_json(&format!("{API}/files/{file_id}"), &[("fields", FILE_FIELDS)], &body).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Moves a remote file to a different folder.
+    pub async fn move_remote_file(&self, file_id: &str, new_parent: &str, old_parent: &str) -> Result<RemoteFile> {
+        let body = serde_json::json!({});
+        let query = [
+            ("addParents", new_parent),
+            ("removeParents", old_parent),
+            ("fields", FILE_FIELDS),
+        ];
+        let resp = self.patch_json(&format!("{API}/files/{file_id}"), &query, &body).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Creates a new file in Drive with binary contents (multipart/related upload).
+    pub async fn create_remote_file(&self, name: &str, parent_id: &str, mime: &str, data: Vec<u8>) -> Result<RemoteFile> {
+        let boundary = "boundary_gdsync_upload";
+        let metadata = serde_json::json!({
+            "name": name,
+            "parents": [parent_id]
+        });
+        let metadata_str = serde_json::to_string(&metadata)?;
+
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata_str}\r\n").as_bytes());
+        body.extend_from_slice(format!("--{boundary}\r\nContent-Type: {mime}\r\n\r\n").as_bytes());
+        body.extend_from_slice(&data);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let ct = format!("multipart/related; boundary={boundary}");
+        let resp = self.request_bytes(
+            reqwest::Method::POST,
+            &format!("{UPLOAD_API}/files"),
+            &[("uploadType", "multipart"), ("fields", FILE_FIELDS)],
+            Some((body, ct)),
+        ).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Updates existing file content in Drive (media upload).
+    pub async fn update_remote_file(&self, file_id: &str, mime: &str, data: Vec<u8>) -> Result<RemoteFile> {
+        let resp = self.request_bytes(
+            reqwest::Method::PATCH,
+            &format!("{UPLOAD_API}/files/{file_id}"),
+            &[("uploadType", "media"), ("fields", FILE_FIELDS)],
+            Some((data, mime.to_string())),
+        ).await?;
+        Ok(resp.json().await?)
     }
 }

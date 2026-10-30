@@ -39,6 +39,18 @@ impl Item {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct UploadTask {
+    pub id: i64,
+    pub file_id: String,
+    pub op: String,
+    pub payload: Option<String>,
+    pub status: String,
+    pub created_at: i64,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+}
+
 const COLS: &str = "ino,id,parent_id,name,mime,size,md5,mtime,web_link,pinned";
 
 fn row(r: &Row) -> rusqlite::Result<Item> {
@@ -53,6 +65,19 @@ fn row(r: &Row) -> rusqlite::Result<Item> {
         mtime: r.get(7)?,
         web_link: r.get(8)?,
         pinned: r.get::<_, i64>(9)? != 0,
+    })
+}
+
+fn upload_row(r: &Row) -> rusqlite::Result<UploadTask> {
+    Ok(UploadTask {
+        id: r.get(0)?,
+        file_id: r.get(1)?,
+        op: r.get(2)?,
+        payload: r.get(3)?,
+        status: r.get(4)?,
+        created_at: r.get(5)?,
+        attempts: r.get(6)?,
+        last_error: r.get(7)?,
     })
 }
 
@@ -96,7 +121,18 @@ impl Db {
                  version TEXT NOT NULL,
                  size INTEGER NOT NULL,
                  last_access INTEGER NOT NULL
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS upload_queue(
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 file_id TEXT NOT NULL,
+                 op TEXT NOT NULL,
+                 payload TEXT,
+                 status TEXT NOT NULL DEFAULT 'pending',
+                 created_at INTEGER NOT NULL,
+                 attempts INTEGER NOT NULL DEFAULT 0,
+                 last_error TEXT
+             );
+             CREATE INDEX IF NOT EXISTS upload_queue_status ON upload_queue(status);",
         )?;
         Ok(Self { conn: Mutex::new(conn) })
     }
@@ -174,6 +210,150 @@ impl Db {
 
     pub fn count_items(&self) -> Result<u64> {
         Ok(self.conn().query_row("SELECT COUNT(*) FROM items", [], |r| r.get::<_, i64>(0))? as u64)
+    }
+
+    pub fn insert_local_item(&self, id: &str, parent_id: Option<&str>, name: &str, mime: &str, size: u64, mtime: i64) -> Result<u64> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO items(id, parent_id, name, mime, size, mtime)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                 parent_id=excluded.parent_id, name=excluded.name, mime=excluded.mime,
+                 size=excluded.size, mtime=excluded.mtime",
+            params![id, parent_id, name, mime, size as i64, mtime],
+        )?;
+        let ino: i64 = conn.query_row("SELECT ino FROM items WHERE id=?1", [id], |r| r.get(0))?;
+        Ok(ino as u64)
+    }
+
+    pub fn update_item_size_mtime(&self, id: &str, size: u64, mtime: i64) -> Result<()> {
+        self.conn().execute(
+            "UPDATE items SET size=?2, mtime=?3 WHERE id=?1",
+            params![id, size as i64, mtime],
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_item(&self, id: &str, new_name: &str, new_parent: Option<&str>) -> Result<()> {
+        let conn = self.conn();
+        if let Some(parent) = new_parent {
+            conn.execute(
+                "UPDATE items SET name=?2, parent_id=?3 WHERE id=?1",
+                params![id, new_name, parent],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE items SET name=?2 WHERE id=?1",
+                params![id, new_name],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn replace_file_id(&self, old_id: &str, new_id: &str, md5: Option<&str>, mtime: i64) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE items SET id=?1, md5=?2, mtime=?3 WHERE id=?4",
+            params![new_id, md5, mtime, old_id],
+        )?;
+        tx.execute(
+            "UPDATE items SET parent_id=?1 WHERE parent_id=?2",
+            params![new_id, old_id],
+        )?;
+        tx.execute(
+            "UPDATE cache SET id=?1 WHERE id=?2",
+            params![new_id, old_id],
+        )?;
+        tx.execute(
+            "UPDATE upload_queue SET file_id=?1 WHERE file_id=?2",
+            params![new_id, old_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<()> {
+        self.conn().execute(
+            "UPDATE items SET pinned=?2 WHERE id=?1",
+            params![id, if pinned { 1 } else { 0 }],
+        )?;
+        Ok(())
+    }
+
+    pub fn lookup_child(&self, parent_id: &str, name: &str) -> Result<Option<Item>> {
+        let sql = format!("SELECT {COLS} FROM items WHERE parent_id=?1 AND name=?2");
+        Ok(self.conn().query_row(&sql, params![parent_id, name], row).optional()?)
+    }
+
+    /// Resolves a relative path (e.g. "Docs/notes.txt") to its database Item.
+    pub fn resolve_relative_path(&self, rel_path: &Path) -> Result<Option<Item>> {
+        let root = match self.by_ino(ROOT_INO)? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let mut current_id = root.id.clone();
+        let mut current_item = root;
+
+        for comp in rel_path.components() {
+            let seg = match comp {
+                std::path::Component::Normal(s) => s.to_string_lossy(),
+                std::path::Component::CurDir => continue,
+                _ => continue,
+            };
+            let children = self.children(&current_id)?;
+            let entries = crate::names::local_entries(children);
+            match entries.into_iter().find(|(name, _)| name == &seg) {
+                Some((_, child)) => {
+                    current_id = child.id.clone();
+                    current_item = child;
+                }
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(current_item))
+    }
+
+    // ---- upload queue ----
+
+    pub fn enqueue_upload(&self, file_id: &str, op: &str, payload: Option<&str>) -> Result<i64> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO upload_queue(file_id, op, payload, status, created_at)
+             VALUES(?1, ?2, ?3, 'pending', ?4)",
+            params![file_id, op, payload, now()],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn peek_pending_uploads(&self, limit: usize) -> Result<Vec<UploadTask>> {
+        let sql = "SELECT id, file_id, op, payload, status, created_at, attempts, last_error
+                   FROM upload_queue WHERE status='pending' ORDER BY id ASC LIMIT ?1";
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(sql)?;
+        let tasks = stmt.query_map([limit as i64], upload_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(tasks)
+    }
+
+    pub fn update_upload_status(&self, id: i64, status: &str, error: Option<&str>) -> Result<()> {
+        self.conn().execute(
+            "UPDATE upload_queue SET status=?2, attempts=attempts+1, last_error=?3 WHERE id=?1",
+            params![id, status, error],
+        )?;
+        Ok(())
+    }
+
+    pub fn complete_upload(&self, id: i64) -> Result<()> {
+        self.conn().execute("DELETE FROM upload_queue WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    pub fn pending_uploads_count(&self) -> Result<u64> {
+        Ok(self.conn().query_row(
+            "SELECT COUNT(*) FROM upload_queue WHERE status='pending'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64)
     }
 
     // ---- key/value ----
@@ -321,5 +501,95 @@ mod tests {
         let ids: Vec<_> = db.cache_evictable().unwrap().into_iter().map(|(id, _)| id).collect();
         assert_eq!(ids, vec!["orphan", "a"]);
         assert_eq!(db.cache_total().unwrap(), 30);
+    }
+
+    #[test]
+    fn upload_queue_lifecycle() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.pending_uploads_count().unwrap(), 0);
+
+        let id1 = db.enqueue_upload("file_1", "create", Some("{\"name\":\"test.txt\"}")).unwrap();
+        let _id2 = db.enqueue_upload("file_2", "update", None).unwrap();
+        assert_eq!(db.pending_uploads_count().unwrap(), 2);
+
+        let tasks = db.peek_pending_uploads(10).unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].id, id1);
+        assert_eq!(tasks[0].file_id, "file_1");
+        assert_eq!(tasks[0].op, "create");
+
+        db.complete_upload(id1).unwrap();
+        assert_eq!(db.pending_uploads_count().unwrap(), 1);
+
+        let remaining = db.peek_pending_uploads(10).unwrap();
+        assert_eq!(remaining[0].file_id, "file_2");
+    }
+
+    #[test]
+    fn local_item_management() {
+        let db = Db::open_in_memory().unwrap();
+        let ino = db.insert_local_item("local_1", Some("ROOT"), "nuevo.txt", "text/plain", 100, 1000).unwrap();
+        assert!(ino > 0);
+
+        let item = db.by_id("local_1").unwrap().unwrap();
+        assert_eq!(item.name, "nuevo.txt");
+        assert_eq!(item.size, 100);
+        assert_eq!(item.pinned, false);
+
+        db.set_pinned("local_1", true).unwrap();
+        let updated = db.by_id("local_1").unwrap().unwrap();
+        assert_eq!(updated.pinned, true);
+
+        db.rename_item("local_1", "renombrado.txt", None).unwrap();
+        let renamed = db.by_id("local_1").unwrap().unwrap();
+        assert_eq!(renamed.name, "renombrado.txt");
+
+        let lookup = db.lookup_child("ROOT", "renombrado.txt").unwrap().unwrap();
+        assert_eq!(lookup.id, "local_1");
+    }
+
+    #[test]
+    fn test_resolve_relative_path() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_root(&rf("ROOT", "Mi unidad", "", FOLDER_MIME)).unwrap();
+        db.upsert(&rf("f1", "Documentos", "ROOT", FOLDER_MIME)).unwrap();
+        db.upsert(&rf("f2", "nota.txt", "f1", "text/plain")).unwrap();
+
+        let resolved = db.resolve_relative_path(Path::new("Documentos/nota.txt")).unwrap().unwrap();
+        assert_eq!(resolved.id, "f2");
+        assert_eq!(resolved.name, "nota.txt");
+
+        // Edge case: root or dot resolves to root
+        let root_res = db.resolve_relative_path(Path::new("")).unwrap().unwrap();
+        assert_eq!(root_res.id, "ROOT");
+        let dot_res = db.resolve_relative_path(Path::new(".")).unwrap().unwrap();
+        assert_eq!(dot_res.id, "ROOT");
+
+        let missing = db.resolve_relative_path(Path::new("Documentos/inexistente.txt")).unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_kv_and_replace_local_id() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.kv_get("test_key").unwrap(), None);
+        db.kv_set("test_key", "test_val").unwrap();
+        assert_eq!(db.kv_get("test_key").unwrap().as_deref(), Some("test_val"));
+
+        db.upsert_root(&rf("ROOT", "Mi unidad", "", FOLDER_MIME)).unwrap();
+        let ino = db.insert_local_item("local_123", Some("ROOT"), "borrador.txt", "text/plain", 50, 200).unwrap();
+        assert!(db.by_id("local_123").unwrap().is_some());
+
+        db.replace_file_id("local_123", "remote_abc", Some("hash123"), 300).unwrap();
+        assert!(db.by_id("local_123").unwrap().is_none());
+
+        let replaced = db.by_id("remote_abc").unwrap().unwrap();
+        assert_eq!(replaced.ino, ino);
+        assert_eq!(replaced.name, "borrador.txt");
+        assert_eq!(replaced.md5.as_deref(), Some("hash123"));
+        assert_eq!(replaced.mtime, 300);
+
+        db.remove("remote_abc").unwrap();
+        assert!(db.by_id("remote_abc").unwrap().is_none());
     }
 }

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=gdsync
+GenericName=Cliente de Google Drive
+Comment=Google Drive sincronizado en tu gestor de archivos
+Exec=gdsync gui
+Icon=folder-gdrive
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;Utility;
+Keywords=google;drive;cloud;sync;storage;
+StartupNotify=true
