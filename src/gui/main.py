@@ -4,17 +4,18 @@ gdsync-gui: Interfaz gráfica oficial para gdsync en KDE Plasma / Linux.
 Construida con PyQt6 para integrarse de forma 100% nativa con KDE y el sistema.
 Aprovecha al máximo todos los comandos de la CLI de gdsync:
 - Monitor de estado y cuotas en tiempo real
-- Explorador interactivo de Drive (pin, unpin, open-web, copy-link)
+- Explorador interactivo de Drive con resolución exacta de rutas (pin, unpin, open-web, copy-link)
 - Cola de subidas y sincronización en vivo
-- Selección selectiva de carpetas
+- Selección selectiva de carpetas (con carga asíncrona sin bloqueos)
 - Asistente de cuenta: Importación de JSON de Google Cloud (client_secret_*.json) y login OAuth
-- Ajustes de montaje, caché, sondeo y resync
+- Ajustes de montaje, caché, sondeo y resync seguro
 - Visor de registros del servicio (logs)
-- Icono en bandeja del sistema (System Tray)
+- Icono en bandeja del sistema (System Tray) y control de instancia única
 """
 
 import sys
 import os
+import time
 import json
 import sqlite3
 import shutil
@@ -22,7 +23,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, QSize, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QSize, QThread, pyqtSignal, QLockFile
 from PyQt6.QtGui import QIcon, QFont, QAction, QColor, QCursor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -123,10 +124,6 @@ def format_bytes(n):
     return f"{n:.1f} PB"
 
 def parse_google_credentials_json(path_or_str):
-    """
-    Extrae client_id y client_secret de un archivo JSON descargado de Google Cloud Console.
-    Soporta formato 'installed', 'web' o plano.
-    """
     p = Path(path_or_str)
     if p.exists():
         with open(p, "r", encoding="utf-8") as f:
@@ -141,8 +138,36 @@ def parse_google_credentials_json(path_or_str):
         raise ValueError("El archivo JSON no contiene los campos 'client_id' y 'client_secret'.")
     return cid, secret
 
+def ensure_dolphin_bookmark(mount_point):
+    places_file = Path.home() / ".local" / "share" / "user-places.xbel"
+    if not places_file.exists():
+        return
+    try:
+        content = places_file.read_text(encoding="utf-8")
+        target_uri = f"file://{Path(mount_point).resolve()}"
+        if target_uri in content or "GoogleDrive" in content:
+            return
+        bookmark_xml = f"""  <bookmark href="{target_uri}">
+   <title>Google Drive</title>
+   <info>
+    <metadata owner="http://freedesktop.org">
+     <bookmark:icon name="folder-gdrive"/>
+    </metadata>
+    <metadata owner="http://www.kde.org">
+     <ID>gdsync-googledrive</ID>
+     <isSystemItem>false</isSystemItem>
+    </metadata>
+   </info>
+  </bookmark>
+</xbel>"""
+        if "</xbel>" in content:
+            updated = content.replace("</xbel>", bookmark_xml)
+            places_file.write_text(updated, encoding="utf-8")
+    except Exception:
+        pass
 
-# ---- HILO EN SEGUNDO PLANO PARA LOGIN INTERACTIVO ----
+
+# ---- HILOS EN SEGUNDO PLANO ----
 class LoginWorker(QThread):
     finished_signal = pyqtSignal(bool, str)
 
@@ -166,10 +191,25 @@ class LoginWorker(QThread):
             if p.returncode == 0:
                 self.finished_signal.emit(True, "¡Sesión iniciada con éxito en Google Drive!")
             else:
-                err = stderr.strip() or stdout.strip() or "Error desconocido durante la autenticación."
+                err = stderr.strip() or stdout.strip() or "Error durante la autenticación."
                 self.finished_signal.emit(False, err)
         except subprocess.TimeoutExpired:
             self.finished_signal.emit(False, "Se agotó el tiempo de espera (3 minutos) esperando la autorización en el navegador.")
+        except Exception as e:
+            self.finished_signal.emit(False, str(e))
+
+
+class FolderLoaderWorker(QThread):
+    finished_signal = pyqtSignal(bool, str)
+
+    def __init__(self, cli_bin):
+        super().__init__()
+        self.cli_bin = cli_bin
+
+    def run(self):
+        try:
+            out = subprocess.check_output([self.cli_bin, "folder", "list-remote"], text=True, timeout=45)
+            self.finished_signal.emit(True, out)
         except Exception as e:
             self.finished_signal.emit(False, str(e))
 
@@ -179,15 +219,17 @@ class GdsyncWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("gdsync - Google Drive")
-        self.resize(880, 640)
+        self.resize(920, 660)
         self.cfg = load_config()
         self.cached_files_ids = set()
+
+        ensure_dolphin_bookmark(self.cfg.get("mount_point", str(Path.home() / "GoogleDrive")))
 
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
 
-        # Barra superior con estado global rápido
+        # Barra superior de estado global
         header = self.init_header()
         main_layout.addLayout(header)
 
@@ -345,12 +387,14 @@ class GdsyncWindow(QMainWindow):
 
         # Tabla de archivos
         self.table_files = QTableWidget()
-        self.table_files.setColumnCount(5)
-        self.table_files.setHorizontalHeaderLabels(["Nombre", "Tamaño", "Tipo", "Estado local", "ID"])
-        self.table_files.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table_files.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_files.setColumnCount(6)
+        self.table_files.setHorizontalHeaderLabels(["Nombre", "Ubicación / Carpeta", "Tamaño", "Tipo", "Estado local", "ID"])
+        self.table_files.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.table_files.setColumnWidth(0, 260)
+        self.table_files.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table_files.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table_files.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_files.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.table_files.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_files.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table_files.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -360,7 +404,7 @@ class GdsyncWindow(QMainWindow):
 
         # Barra de acciones inferiores para el archivo seleccionado
         act_box = QHBoxLayout()
-        self.btn_file_pin = QPushButton("📌 Disponible sin conexión (Pin)")
+        self.btn_file_pin = QPushButton("📌 Mantener disponible sin conexión (Pin)")
         self.btn_file_pin.clicked.connect(self.action_pin_selected)
         self.btn_file_unpin = QPushButton("☁️ Liberar espacio (Unpin)")
         self.btn_file_unpin.clicked.connect(self.action_unpin_selected)
@@ -368,11 +412,14 @@ class GdsyncWindow(QMainWindow):
         self.btn_file_open_web.clicked.connect(self.action_open_web_selected)
         self.btn_file_copy_link = QPushButton("📋 Copiar enlace")
         self.btn_file_copy_link.clicked.connect(self.action_copy_link_selected)
+        self.btn_file_open_local = QPushButton("📂 Abrir localmente")
+        self.btn_file_open_local.clicked.connect(self.action_open_local_selected)
 
         act_box.addWidget(self.btn_file_pin)
         act_box.addWidget(self.btn_file_unpin)
         act_box.addWidget(self.btn_file_open_web)
         act_box.addWidget(self.btn_file_copy_link)
+        act_box.addWidget(self.btn_file_open_local)
         layout.addLayout(act_box)
 
         self.tabs.addTab(w, "📁 Explorador de Drive")
@@ -441,7 +488,6 @@ class GdsyncWindow(QMainWindow):
         w = QWidget()
         layout = QVBoxLayout(w)
 
-        # Asistente de importación de JSON
         grp_import = QGroupBox("Importar credenciales de Google Cloud")
         imp_lay = QVBoxLayout(grp_import)
         lbl_info = QLabel(
@@ -457,7 +503,6 @@ class GdsyncWindow(QMainWindow):
         imp_lay.addWidget(self.btn_import_json)
         layout.addWidget(grp_import)
 
-        # Campos manuales de credenciales
         grp_manual = QGroupBox("Credenciales de la aplicación (OAuth 2.0)")
         m_lay = QVBoxLayout(grp_manual)
 
@@ -502,7 +547,6 @@ class GdsyncWindow(QMainWindow):
 
         layout.addWidget(grp_manual)
 
-        # Acción de Login / Logout
         grp_auth = QGroupBox("Estado de sesión y autorización")
         a_lay = QVBoxLayout(grp_auth)
         self.lbl_auth_status = QLabel("Verificando...")
@@ -726,7 +770,6 @@ class GdsyncWindow(QMainWindow):
                 pending = cur.fetchone()[0]
                 self.lbl_upload_queue.setText(f"Tareas pendientes de subida: <b>{pending}</b>")
 
-                # Cuota guardada en tabla kv
                 cur.execute("SELECT key, value FROM kv WHERE key IN ('storage_total', 'storage_used')")
                 kv_rows = dict(cur.fetchall())
                 conn.close()
@@ -760,24 +803,54 @@ class GdsyncWindow(QMainWindow):
         try:
             conn = sqlite3.connect(f"file:{dbp}?mode=ro", uri=True)
             cur = conn.cursor()
-            cur.execute("SELECT id, name, size, mime, pinned, web_link FROM items ORDER BY (mime='application/vnd.google-apps.folder') DESC, name ASC")
+            # Cargar mapa de id -> (parent_id, name) para reconstruir rutas completas
+            cur.execute("SELECT id, parent_id, name FROM items")
+            parent_map = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+
+            def resolve_rel_path(item_id):
+                parts = []
+                curr = item_id
+                visited = set()
+                while curr and curr not in visited:
+                    visited.add(curr)
+                    if curr not in parent_map:
+                        break
+                    pid, name = parent_map[curr]
+                    if not pid:
+                        break
+                    parts.append(name)
+                    curr = pid
+                parts.reverse()
+                return "/".join(parts)
+
+            cur.execute("""
+                SELECT id, name, size, mime, pinned, web_link
+                FROM items
+                WHERE ino != 1
+                ORDER BY (mime='application/vnd.google-apps.folder') DESC, name ASC
+                LIMIT 2000
+            """)
             rows = cur.fetchall()
             conn.close()
+
+            rows_with_path = [
+                (r[0], r[1], r[2], r[3], r[4], r[5], resolve_rel_path(r[0]))
+                for r in rows
+            ]
         except Exception:
             return
 
-        self.all_files_data = rows
-        self.populate_files_table(rows)
+        self.all_files_data = rows_with_path
+        self.populate_files_table(rows_with_path)
 
     def populate_files_table(self, rows):
         self.table_files.setRowCount(len(rows))
         FOLDER_MIME = "application/vnd.google-apps.folder"
 
-        for row_idx, (fid, name, size, mime, pinned, web_link) in enumerate(rows):
+        for row_idx, (fid, name, size, mime, pinned, web_link, rel_path) in enumerate(rows):
             is_folder = (mime == FOLDER_MIME)
             icon = "📁 " if is_folder else "📄 "
 
-            # Estado
             if is_folder:
                 status_str = "—"
             elif pinned:
@@ -787,7 +860,6 @@ class GdsyncWindow(QMainWindow):
             else:
                 status_str = "☁️ Solo en la nube"
 
-            # Formato de tamaño
             size_str = "—" if is_folder else format_bytes(size)
 
             item_name = QTableWidgetItem(f"{icon}{name}")
@@ -795,6 +867,11 @@ class GdsyncWindow(QMainWindow):
             item_name.setData(Qt.ItemDataRole.UserRole + 1, web_link)
             item_name.setData(Qt.ItemDataRole.UserRole + 2, is_folder)
             item_name.setData(Qt.ItemDataRole.UserRole + 3, name)
+            item_name.setData(Qt.ItemDataRole.UserRole + 4, rel_path)
+
+            folder_location = str(Path(rel_path).parent) if "/" in rel_path else "(Raíz)"
+            item_location = QTableWidgetItem(folder_location)
+            item_location.setForeground(QColor("#757575"))
 
             item_size = QTableWidgetItem(size_str)
             item_size.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -813,10 +890,11 @@ class GdsyncWindow(QMainWindow):
             item_id = QTableWidgetItem(fid)
 
             self.table_files.setItem(row_idx, 0, item_name)
-            self.table_files.setItem(row_idx, 1, item_size)
-            self.table_files.setItem(row_idx, 2, item_type)
-            self.table_files.setItem(row_idx, 3, item_status)
-            self.table_files.setItem(row_idx, 4, item_id)
+            self.table_files.setItem(row_idx, 1, item_location)
+            self.table_files.setItem(row_idx, 2, item_size)
+            self.table_files.setItem(row_idx, 3, item_type)
+            self.table_files.setItem(row_idx, 4, item_status)
+            self.table_files.setItem(row_idx, 5, item_id)
 
     def filter_files_view(self):
         if not hasattr(self, "all_files_data"):
@@ -826,16 +904,15 @@ class GdsyncWindow(QMainWindow):
 
         filtered = []
         for row in self.all_files_data:
-            fid, name, size, mime, pinned, web_link = row
-            if query and query not in name.lower():
+            fid, name, size, mime, pinned, web_link, rel_path = row
+            if query and (query not in name.lower() and query not in rel_path.lower()):
                 continue
 
-            # Filtro por tipo de estado
-            if filter_idx == 1 and not pinned: # Pinned
+            if filter_idx == 1 and not pinned:
                 continue
-            elif filter_idx == 2 and (fid not in self.cached_files_ids or pinned): # Cache local
+            elif filter_idx == 2 and (fid not in self.cached_files_ids or pinned):
                 continue
-            elif filter_idx == 3 and (fid in self.cached_files_ids or pinned): # Cloud only
+            elif filter_idx == 3 and (fid in self.cached_files_ids or pinned):
                 continue
 
             filtered.append(row)
@@ -852,6 +929,7 @@ class GdsyncWindow(QMainWindow):
         web_link = item_name.data(Qt.ItemDataRole.UserRole + 1)
         is_folder = item_name.data(Qt.ItemDataRole.UserRole + 2)
         fname = item_name.data(Qt.ItemDataRole.UserRole + 3)
+        rel_path = item_name.data(Qt.ItemDataRole.UserRole + 4) or fname
 
         menu = QMenu(self)
         act_pin = menu.addAction("📌 Mantener disponible sin conexión (Pin)")
@@ -864,15 +942,15 @@ class GdsyncWindow(QMainWindow):
 
         action = menu.exec(self.table_files.viewport().mapToGlobal(pos))
         if action == act_pin:
-            self.pin_file_by_id(fid, fname)
+            self.pin_file_by_id(fid, fname, rel_path)
         elif action == act_unpin:
-            self.unpin_file_by_id(fid, fname)
+            self.unpin_file_by_id(fid, fname, rel_path)
         elif action == act_open_web:
             self.open_web_by_id(fid, web_link)
         elif action == act_copy_link:
             self.copy_link_by_id(fid, web_link)
         elif action == act_open_local:
-            self.open_local_by_name(fname)
+            self.open_local_by_path(rel_path, is_folder)
 
     def get_selected_file_info(self):
         row = self.table_files.currentRow()
@@ -884,18 +962,19 @@ class GdsyncWindow(QMainWindow):
             "id": item_name.data(Qt.ItemDataRole.UserRole),
             "web_link": item_name.data(Qt.ItemDataRole.UserRole + 1),
             "is_folder": item_name.data(Qt.ItemDataRole.UserRole + 2),
-            "name": item_name.data(Qt.ItemDataRole.UserRole + 3)
+            "name": item_name.data(Qt.ItemDataRole.UserRole + 3),
+            "rel_path": item_name.data(Qt.ItemDataRole.UserRole + 4) or item_name.data(Qt.ItemDataRole.UserRole + 3)
         }
 
     def action_pin_selected(self):
         info = self.get_selected_file_info()
         if info:
-            self.pin_file_by_id(info["id"], info["name"])
+            self.pin_file_by_id(info["id"], info["name"], info["rel_path"])
 
     def action_unpin_selected(self):
         info = self.get_selected_file_info()
         if info:
-            self.unpin_file_by_id(info["id"], info["name"])
+            self.unpin_file_by_id(info["id"], info["name"], info["rel_path"])
 
     def action_open_web_selected(self):
         info = self.get_selected_file_info()
@@ -907,7 +986,12 @@ class GdsyncWindow(QMainWindow):
         if info:
             self.copy_link_by_id(info["id"], info["web_link"])
 
-    def pin_file_by_id(self, fid, fname):
+    def action_open_local_selected(self):
+        info = self.get_selected_file_info()
+        if info:
+            self.open_local_by_path(info["rel_path"], info["is_folder"])
+
+    def pin_file_by_id(self, fid, fname, rel_path=None):
         dbp = db_path()
         if dbp.exists():
             try:
@@ -918,17 +1002,16 @@ class GdsyncWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"No se pudo actualizar estado en base de datos: {e}")
                 return
-        # Ejecutar CLI pin si el daemon está corriendo para disparar descarga inmediata
         cli = find_cli()
         mount = Path(self.cfg.get("mount_point", str(Path.home() / "GoogleDrive")))
-        target = mount / fname
+        target = mount / (rel_path or fname)
         if target.exists():
             subprocess.Popen([cli, "pin", str(target)])
         QMessageBox.information(self, "Pin", f"'{fname}' marcado como Disponible sin conexión.")
         self.load_files_from_db()
         self.refresh_status_background()
 
-    def unpin_file_by_id(self, fid, fname):
+    def unpin_file_by_id(self, fid, fname, rel_path=None):
         dbp = db_path()
         if dbp.exists():
             try:
@@ -939,6 +1022,11 @@ class GdsyncWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"No se pudo actualizar estado en base de datos: {e}")
                 return
+        cli = find_cli()
+        mount = Path(self.cfg.get("mount_point", str(Path.home() / "GoogleDrive")))
+        target = mount / (rel_path or fname)
+        if target.exists():
+            subprocess.Popen([cli, "unpin", str(target)])
         QMessageBox.information(self, "Unpin", f"'{fname}' desmarcado. Ahora puede ser liberado de la caché.")
         self.load_files_from_db()
         self.refresh_status_background()
@@ -953,18 +1041,22 @@ class GdsyncWindow(QMainWindow):
         cb.setText(url)
         QMessageBox.information(self, "Enlace copiado", f"Enlace de Google Drive copiado al portapapeles:\n{url}")
 
-    def open_local_by_name(self, fname):
+    def open_local_by_path(self, rel_path, is_folder=False):
         mount = Path(self.cfg.get("mount_point", str(Path.home() / "GoogleDrive")))
-        target = mount / fname
+        target = mount / rel_path
         if target.exists():
             subprocess.Popen(["xdg-open", str(target)])
         else:
-            subprocess.Popen(["xdg-open", str(mount)])
+            parent_dir = target.parent
+            if parent_dir.exists():
+                subprocess.Popen(["xdg-open", str(parent_dir)])
+            else:
+                subprocess.Popen(["xdg-open", str(mount)])
 
     def on_file_double_clicked(self, index):
         info = self.get_selected_file_info()
         if info:
-            self.open_local_by_name(info["name"])
+            self.open_local_by_path(info["rel_path"], info["is_folder"])
 
     # ---- PESTAÑA COLA DE SUBIDAS ----
     def load_queue_from_db(self):
@@ -1010,10 +1102,19 @@ class GdsyncWindow(QMainWindow):
 
     def load_remote_folders(self):
         cli = find_cli()
-        try:
-            out = subprocess.check_output([cli, "folder", "list-remote"], text=True)
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"No se pudo consultar carpetas remotas:\n{e}\n\nAsegurate de haber iniciado sesión con 'gdsync login'.")
+        self.btn_refresh_folders.setEnabled(False)
+        self.btn_refresh_folders.setText("Consultando carpetas en Google Drive...")
+
+        self.folder_worker = FolderLoaderWorker(cli)
+        self.folder_worker.finished_signal.connect(self.on_remote_folders_loaded)
+        self.folder_worker.start()
+
+    def on_remote_folders_loaded(self, success, out):
+        self.btn_refresh_folders.setEnabled(True)
+        self.btn_refresh_folders.setText("Cargar carpetas de Google Drive")
+
+        if not success:
+            QMessageBox.warning(self, "Error", f"No se pudo consultar carpetas remotas:\n{out}\n\nAsegurate de haber iniciado sesión con 'gdsync login'.")
             return
 
         self.tree_folders.blockSignals(True)
@@ -1074,7 +1175,6 @@ class GdsyncWindow(QMainWindow):
             self.btn_toggle_secret.setText("👁️")
 
     def import_credentials_json_dialog(self):
-        # Iniciar preferentemente en ~/Descargas o ~/Downloads
         initial_dir = str(Path.home() / "Descargas")
         if not os.path.exists(initial_dir):
             initial_dir = str(Path.home() / "Downloads")
@@ -1174,7 +1274,13 @@ class GdsyncWindow(QMainWindow):
         self.cfg["cache_max_gb"] = self.spin_cache.value()
         self.cfg["poll_interval_secs"] = self.spin_poll.value()
         save_config(self.cfg)
-        QMessageBox.information(self, "Ajustes", "Configuración guardada correctamente.")
+        ensure_dolphin_bookmark(mount)
+        QMessageBox.information(
+            self,
+            "Ajustes",
+            "Configuración guardada correctamente.\n\n"
+            "Nota: El daemon detectará automáticamente los cambios de sondeo y carpetas en su siguiente ciclo."
+        )
         self.refresh_status_background()
 
     def action_resync(self):
@@ -1182,13 +1288,21 @@ class GdsyncWindow(QMainWindow):
             self,
             "Restablecer caché y base de datos (Resync)",
             "Esta acción borrará la base de datos local y la caché de archivos en disco. "
-            "El servicio se detendrá si está en ejecución y tus datos se descargarán de nuevo bajo demanda.\n\n"
+            "El servicio se detendrá de forma segura y tus datos se descargarán de nuevo bajo demanda.\n\n"
             "¿Deseás continuar?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
             if is_daemon_running():
                 subprocess.call(["pkill", "-f", "gdsyncd"])
+                # Esperar hasta 5 segundos a que el daemon termine de desmontar
+                for _ in range(50):
+                    if not is_daemon_running():
+                        break
+                    time.sleep(0.1)
+                mount = self.cfg.get("mount_point", str(Path.home() / "GoogleDrive"))
+                subprocess.call(["fusermount3", "-u", mount], stderr=subprocess.DEVNULL)
+
             cli = find_cli()
             subprocess.call([cli, "resync"])
             QMessageBox.information(self, "Resync", "Caché y base de datos local borradas correctamente.")
@@ -1225,7 +1339,13 @@ class GdsyncWindow(QMainWindow):
     def restart_daemon(self):
         if is_daemon_running():
             subprocess.call(["pkill", "-f", "gdsyncd"])
-            QTimer.singleShot(1000, lambda: subprocess.Popen([find_daemon()]))
+            for _ in range(30):
+                if not is_daemon_running():
+                    break
+                time.sleep(0.1)
+            mount = self.cfg.get("mount_point", str(Path.home() / "GoogleDrive"))
+            subprocess.call(["fusermount3", "-u", mount], stderr=subprocess.DEVNULL)
+            QTimer.singleShot(500, lambda: subprocess.Popen([find_daemon()]))
         else:
             subprocess.Popen([find_daemon()])
         QTimer.singleShot(1500, self.refresh_all)
@@ -1233,6 +1353,7 @@ class GdsyncWindow(QMainWindow):
     def open_in_dolphin(self):
         mount = self.cfg.get("mount_point", str(Path.home() / "GoogleDrive"))
         os.makedirs(mount, exist_ok=True)
+        ensure_dolphin_bookmark(mount)
         subprocess.Popen(["xdg-open", mount])
 
     def open_drive_web_root(self):
@@ -1251,6 +1372,15 @@ class GdsyncWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+
+    # Control de instancia única para evitar ventanas duplicadas
+    lock_file = data_dir() / "gui.lock"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(lock_file))
+    if not lock.tryLock(100):
+        print("gdsync gui ya se encuentra en ejecución.")
+        sys.exit(0)
+
     win = GdsyncWindow()
     win.show()
     sys.exit(app.exec())

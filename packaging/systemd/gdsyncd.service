@@ -7,6 +7,7 @@ Wants=network-online.target
 ExecStart=%h/.cargo/bin/gdsyncd
 Restart=on-failure
 RestartSec=10
+ExecStopPost=-/usr/bin/fusermount -u %h/GoogleDrive
 
 [Install]
 WantedBy=default.target

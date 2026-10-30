@@ -70,11 +70,14 @@ fn main() -> Result<()> {
     {
         let (drive, db, cache, cfg_clone) = (drive.clone(), db.clone(), cache.clone(), cfg.clone());
         let (total_s, used_s) = (total_space.clone(), used_space.clone());
-        let every = Duration::from_secs(cfg.poll_interval_secs.max(5));
 
         rt.spawn(async move {
             let mut tick = 0u64;
             loop {
+                // Reload configuration dynamically to detect changes in sync_folders or intervals
+                let active_cfg = Config::load().unwrap_or_else(|_| cfg_clone.clone());
+                let sleep_duration = Duration::from_secs(active_cfg.poll_interval_secs.max(5));
+
                 // 1. Process pending local uploads first
                 match sync::process_upload_queue(&drive, &db, &cache).await {
                     Ok(0) => {}
@@ -83,7 +86,7 @@ fn main() -> Result<()> {
                 }
 
                 // 2. Poll remote changes
-                match sync::poll_changes(&drive, &db, &cache, &cfg_clone).await {
+                match sync::poll_changes(&drive, &db, &cache, &active_cfg).await {
                     Ok(0) => {}
                     Ok(n) => info!("{n} cambios remotos aplicados"),
                     Err(e) => warn!("no se pudieron consultar cambios remotos: {e:#}"),
@@ -100,7 +103,7 @@ fn main() -> Result<()> {
                     }
                 }
 
-                tokio::time::sleep(every).await;
+                tokio::time::sleep(sleep_duration).await;
             }
         });
     }
