@@ -546,10 +546,10 @@ async fn main() -> Result<()> {
             if let Some(path) = script {
                 let mut cmd = std::process::Command::new("python3");
                 cmd.arg(&path);
-                if *minimized {
+                if minimized {
                     cmd.arg("--minimized");
                 }
-                if *tray {
+                if tray {
                     cmd.arg("--tray");
                 }
                 cmd.args(args);
