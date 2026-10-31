@@ -73,7 +73,17 @@ enum Cmd {
         path: PathBuf,
     },
     /// Abre la interfaz gráfica de usuario (GUI).
-    Gui,
+    Gui {
+        /// Inicia minimizado en la bandeja del sistema
+        #[arg(long)]
+        minimized: bool,
+        /// Inicia minimizado en la bandeja del sistema
+        #[arg(long)]
+        tray: bool,
+        /// Argumentos adicionales para la interfaz gráfica
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Cierra la sesión activa y revoca el token en Google.
     Logout,
     /// Borra la base de datos local y la caché (ejecutar con el daemon detenido).
@@ -515,7 +525,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        Cmd::Gui => {
+        Cmd::Gui { minimized, tray, args } => {
             let mut candidates = vec![
                 gdsync_core::config::data_dir().join("gui/main.py"),
                 PathBuf::from("/usr/local/share/gdsync/gui/main.py"),
@@ -534,8 +544,16 @@ async fn main() -> Result<()> {
 
             let script = candidates.into_iter().find(|p| p.exists());
             if let Some(path) = script {
-                let mut child = std::process::Command::new("python3")
-                    .arg(&path)
+                let mut cmd = std::process::Command::new("python3");
+                cmd.arg(&path);
+                if *minimized {
+                    cmd.arg("--minimized");
+                }
+                if *tray {
+                    cmd.arg("--tray");
+                }
+                cmd.args(args);
+                let mut child = cmd
                     .spawn()
                     .with_context(|| format!("falló al iniciar python3 {}", path.display()))?;
                 let _ = child.wait();

@@ -292,6 +292,297 @@ class FolderLoaderWorker(QThread):
             self.finished_signal.emit(False, str(e))
 
 
+def get_root_pinned_items(conn):
+    query = """
+    WITH RECURSIVE
+    path_builder(id, name, parent_id, mime, size, full_path) AS (
+        SELECT id, name, parent_id, mime, size, name as full_path
+        FROM items
+        WHERE parent_id = (SELECT id FROM items WHERE ino=1)
+        UNION ALL
+        SELECT i.id, i.name, i.parent_id, i.mime, i.size, pb.full_path || '/' || i.name
+        FROM items i JOIN path_builder pb ON i.parent_id = pb.id
+    ),
+    ancestors(item_id, ancestor_id, ancestor_pinned) AS (
+        SELECT i.id, i.parent_id, p.pinned
+        FROM items i
+        JOIN items p ON i.parent_id = p.id
+        UNION ALL
+        SELECT a.item_id, p.parent_id, p.pinned
+        FROM ancestors a
+        JOIN items p ON a.ancestor_id = p.id
+        WHERE p.parent_id IS NOT NULL
+    )
+    SELECT pb.id, pb.name, pb.mime, pb.size, pb.full_path
+    FROM path_builder pb
+    JOIN items i ON pb.id = i.id
+    WHERE i.pinned = 1
+      AND NOT EXISTS (
+          SELECT 1 FROM ancestors a
+          WHERE a.item_id = pb.id AND a.ancestor_pinned = 1
+      )
+    ORDER BY (pb.mime = 'application/vnd.google-apps.folder') DESC, pb.full_path ASC;
+    """
+    cur = conn.cursor()
+    cur.execute(query)
+    rows = cur.fetchall()
+
+    results = []
+    FOLDER_MIME = "application/vnd.google-apps.folder"
+    for fid, name, mime, size, full_path in rows:
+        is_folder = (mime == FOLDER_MIME)
+        if is_folder:
+            cur.execute("""
+                WITH RECURSIVE sub(id, size, mime) AS (
+                    SELECT id, size, mime FROM items WHERE id = ?
+                    UNION ALL
+                    SELECT i.id, i.size, i.mime FROM items i JOIN sub s ON i.parent_id = s.id
+                )
+                SELECT 
+                    COUNT(CASE WHEN mime != 'application/vnd.google-apps.folder' AND mime NOT LIKE 'application/vnd.google-apps.%' THEN 1 END),
+                    COALESCE(SUM(CASE WHEN mime != 'application/vnd.google-apps.folder' AND mime NOT LIKE 'application/vnd.google-apps.%' THEN size END), 0),
+                    COUNT(CASE WHEN id IN (SELECT id FROM cache) AND mime != 'application/vnd.google-apps.folder' THEN 1 END)
+                FROM sub;
+            """, (fid,))
+            file_count, total_size, cached_count = cur.fetchone()
+            results.append({
+                "id": fid,
+                "name": name,
+                "mime": mime,
+                "is_folder": True,
+                "full_path": full_path,
+                "file_count": file_count or 0,
+                "total_size": total_size or 0,
+                "cached_count": cached_count or 0,
+            })
+        else:
+            cur.execute("SELECT 1 FROM cache WHERE id=?", (fid,))
+            is_cached = cur.fetchone() is not None
+            results.append({
+                "id": fid,
+                "name": name,
+                "mime": mime,
+                "is_folder": False,
+                "full_path": full_path,
+                "file_count": 1,
+                "total_size": size or 0,
+                "cached_count": 1 if is_cached else 0,
+            })
+    return results
+
+
+class PinnedItemsDialog(QDialog):
+    def __init__(self, parent=None, cfg=None):
+        super().__init__(parent)
+        self.setWindowTitle("📌 Elementos disponibles sin conexión (Carpetas y archivos)")
+        self.resize(880, 500)
+        self.cfg = cfg or {}
+        self.mount_point = Path(self.cfg.get("mount_point", str(Path.home() / "GoogleDrive")))
+
+        layout = QVBoxLayout(self)
+
+        # Header con resumen
+        self.lbl_summary = QLabel("Cargando elementos...")
+        self.lbl_summary.setStyleSheet("font-weight: bold; font-size: 13px; margin: 4px 0;")
+        layout.addWidget(self.lbl_summary)
+
+        # Barra de búsqueda
+        search_box = QHBoxLayout()
+        self.txt_search = QLineEdit()
+        self.txt_search.setPlaceholderText("🔍 Filtrar por nombre o ubicación...")
+        self.txt_search.textChanged.connect(self.filter_items)
+        search_box.addWidget(self.txt_search)
+
+        btn_refresh = QPushButton("Actualizar")
+        btn_refresh.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        btn_refresh.clicked.connect(self.load_items)
+        search_box.addWidget(btn_refresh)
+        layout.addLayout(search_box)
+
+        # Tabla de elementos
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels([
+            "Tipo", "Ubicación / Nombre", "Archivos contenidos", "Tamaño total", "Estado en caché local"
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.doubleClicked.connect(self.on_open_local)
+        layout.addWidget(self.table)
+
+        # Barra de botones inferiores
+        btn_bar = QHBoxLayout()
+        self.btn_open_local = QPushButton("📂 Abrir en explorador")
+        self.btn_open_local.clicked.connect(self.on_open_local)
+        btn_bar.addWidget(self.btn_open_local)
+
+        self.btn_open_web = QPushButton("🌐 Abrir en Drive Web")
+        self.btn_open_web.clicked.connect(self.on_open_web)
+        btn_bar.addWidget(self.btn_open_web)
+
+        self.btn_unpin = QPushButton("☁️ Liberar espacio local (Unpin)")
+        self.btn_unpin.clicked.connect(self.on_unpin)
+        btn_bar.addWidget(self.btn_unpin)
+
+        btn_bar.addStretch()
+        btn_close = QPushButton("Cerrar")
+        btn_close.clicked.connect(self.accept)
+        btn_bar.addWidget(btn_close)
+
+        layout.addLayout(btn_bar)
+
+        self.items_data = []
+        self.load_items()
+
+    def load_items(self):
+        dbp = db_path()
+        if not dbp.exists():
+            self.lbl_summary.setText("No se encontró la base de datos de gdsync.")
+            return
+
+        try:
+            conn = sqlite3.connect(dbp)
+            self.items_data = get_root_pinned_items(conn)
+            conn.close()
+        except Exception as e:
+            self.lbl_summary.setText(f"Error al leer datos: {e}")
+            return
+
+        folders_cnt = sum(1 for it in self.items_data if it["is_folder"])
+        files_cnt = sum(1 for it in self.items_data if not it["is_folder"])
+        total_sz = sum(it["total_size"] for it in self.items_data)
+        total_files = sum(it["file_count"] for it in self.items_data)
+
+        self.lbl_summary.setText(
+            f"Elementos anclados: {folders_cnt} carpeta(s) padre, {files_cnt} archivo(s) suelto(s) "
+            f"({total_files} archivos en total, {format_bytes(total_sz)})"
+        )
+        self.filter_items()
+
+    def filter_items(self):
+        q = self.txt_search.text().lower().strip()
+        filtered = [
+            it for it in self.items_data
+            if not q or q in it["name"].lower() or q in it["full_path"].lower()
+        ]
+        self.populate_table(filtered)
+
+    def populate_table(self, items):
+        self.table.setRowCount(len(items))
+        for row_idx, it in enumerate(items):
+            tipo = "📁 Carpeta" if it["is_folder"] else "📄 Archivo"
+            item_tipo = QTableWidgetItem(tipo)
+
+            item_path = QTableWidgetItem(it["full_path"])
+            item_path.setData(Qt.ItemDataRole.UserRole, it)
+
+            if it["is_folder"]:
+                cnt_str = f"{it['file_count']} arch."
+                pct = (it["cached_count"] / it["file_count"] * 100) if it["file_count"] else 100
+                cache_str = f"{it['cached_count']}/{it['file_count']} en caché ({pct:.0f}%)"
+            else:
+                cnt_str = "1 arch."
+                cache_str = "En caché" if it["cached_count"] == 1 else "Pendiente"
+
+            item_cnt = QTableWidgetItem(cnt_str)
+            item_cnt.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            item_size = QTableWidgetItem(format_bytes(it["total_size"]))
+            item_size.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            item_cache = QTableWidgetItem(cache_str)
+            if it["is_folder"] and it["cached_count"] == it["file_count"] and it["file_count"] > 0:
+                item_cache.setForeground(QColor("#2e7d32"))
+            elif not it["is_folder"] and it["cached_count"] == 1:
+                item_cache.setForeground(QColor("#2e7d32"))
+            else:
+                item_cache.setForeground(QColor("#e65100"))
+
+            self.table.setItem(row_idx, 0, item_tipo)
+            self.table.setItem(row_idx, 1, item_path)
+            self.table.setItem(row_idx, 2, item_cnt)
+            self.table.setItem(row_idx, 3, item_size)
+            self.table.setItem(row_idx, 4, item_cache)
+
+    def get_selected_item(self):
+        sel = self.table.selectedItems()
+        if not sel:
+            return None
+        row = sel[0].row()
+        item_path = self.table.item(row, 1)
+        if item_path:
+            return item_path.data(Qt.ItemDataRole.UserRole)
+        return None
+
+    def on_open_local(self):
+        it = self.get_selected_item()
+        if not it:
+            return
+        local_path = self.mount_point / it["full_path"]
+        if local_path.exists():
+            subprocess.Popen(["xdg-open", str(local_path)])
+        else:
+            QMessageBox.warning(self, "No disponible", f"La ruta local '{local_path}' no existe o no está montada.")
+
+    def on_open_web(self):
+        it = self.get_selected_item()
+        if not it:
+            return
+        dbp = db_path()
+        if dbp.exists():
+            try:
+                conn = sqlite3.connect(dbp)
+                cur = conn.cursor()
+                cur.execute("SELECT web_link FROM items WHERE id=?", (it["id"],))
+                row = cur.fetchone()
+                conn.close()
+                url = (row and row[0]) or f"https://drive.google.com/open?id={it['id']}"
+                subprocess.Popen(["xdg-open", url])
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"No se pudo abrir el enlace: {e}")
+
+    def on_unpin(self):
+        it = self.get_selected_item()
+        if not it:
+            return
+        resp = QMessageBox.question(
+            self,
+            "Liberar espacio local",
+            f"¿Deseás desmarcar '{it['name']}' de 'Disponible sin conexión'?\n\n"
+            f"El archivo o carpeta no se borrará de Drive ni del equipo ahora, pero su espacio en caché podrá liberarse automáticamente cuando sea necesario.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if resp == QMessageBox.StandardButton.Yes:
+            dbp = db_path()
+            if dbp.exists():
+                try:
+                    conn = sqlite3.connect(dbp)
+                    cur = conn.cursor()
+                    if it["is_folder"]:
+                        cur.execute("""
+                            WITH RECURSIVE sub(id) AS (
+                                SELECT id FROM items WHERE id = ?
+                                UNION ALL
+                                SELECT i.id FROM items i JOIN sub s ON i.parent_id = s.id
+                            )
+                            UPDATE items SET pinned = 0 WHERE id IN (SELECT id FROM sub)
+                        """, (it["id"],))
+                    else:
+                        cur.execute("UPDATE items SET pinned = 0 WHERE id = ?", (it["id"],))
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    QMessageBox.warning(self, "Error", f"No se pudo actualizar el estado: {e}")
+                    return
+            self.load_items()
+
+
 # ---- VENTANA PRINCIPAL ----
 class GdsyncWindow(QMainWindow):
     def __init__(self):
@@ -417,7 +708,17 @@ class GdsyncWindow(QMainWindow):
 
         sync_lay.addWidget(self.lbl_items_count)
         sync_lay.addWidget(self.lbl_upload_queue)
-        sync_lay.addWidget(self.lbl_pinned_count)
+
+        pin_row = QHBoxLayout()
+        self.lbl_pinned_count = QLabel("Archivos disponibles sin conexión (anclados): 0")
+        self.btn_view_pinned = QPushButton("📌 Ver carpetas y archivos sin conexión...")
+        self.btn_view_pinned.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView))
+        self.btn_view_pinned.clicked.connect(self.show_pinned_items_dialog)
+        pin_row.addWidget(self.lbl_pinned_count)
+        pin_row.addStretch()
+        pin_row.addWidget(self.btn_view_pinned)
+        sync_lay.addLayout(pin_row)
+
         sync_lay.addWidget(self.lbl_sync_mode)
         layout.addWidget(grp_sync)
 
@@ -452,7 +753,8 @@ class GdsyncWindow(QMainWindow):
         self.cmb_file_filter = QComboBox()
         self.cmb_file_filter.addItems([
             "Todos los elementos",
-            "📌 Disponible sin conexión (Pinned)",
+            "📌 Raíces ancladas (Carpetas y archivos sueltos)",
+            "📌 Todos los archivos sin conexión (Pinned)",
             "💾 En caché local",
             "☁️ Solo en la nube"
         ])
@@ -925,6 +1227,7 @@ class GdsyncWindow(QMainWindow):
 
     # ---- PESTAÑA EXPLORADOR DE ARCHIVOS ----
     def load_files_from_db(self):
+        self.root_pinned_ids = set()
         dbp = db_path()
         if not dbp.exists():
             self.table_files.setRowCount(0)
@@ -932,6 +1235,11 @@ class GdsyncWindow(QMainWindow):
 
         try:
             conn = sqlite3.connect(f"file:{dbp}?mode=ro", uri=True)
+            try:
+                root_pinned = get_root_pinned_items(conn)
+                self.root_pinned_ids = {it["id"] for it in root_pinned}
+            except Exception:
+                pass
             cur = conn.cursor()
             # Cargar mapa de id -> (parent_id, name) para reconstruir rutas completas
             cur.execute("SELECT id, parent_id, name FROM items")
@@ -1038,11 +1346,13 @@ class GdsyncWindow(QMainWindow):
             if query and (query not in name.lower() and query not in rel_path.lower()):
                 continue
 
-            if filter_idx == 1 and not pinned:
+            if filter_idx == 1 and fid not in getattr(self, "root_pinned_ids", set()):
                 continue
-            elif filter_idx == 2 and (fid not in self.cached_files_ids or pinned):
+            elif filter_idx == 2 and not pinned:
                 continue
-            elif filter_idx == 3 and (fid in self.cached_files_ids or pinned):
+            elif filter_idx == 3 and (fid not in self.cached_files_ids or pinned):
+                continue
+            elif filter_idx == 4 and (fid in self.cached_files_ids or pinned):
                 continue
 
             filtered.append(row)
@@ -1095,6 +1405,12 @@ class GdsyncWindow(QMainWindow):
             "name": item_name.data(Qt.ItemDataRole.UserRole + 3),
             "rel_path": item_name.data(Qt.ItemDataRole.UserRole + 4) or item_name.data(Qt.ItemDataRole.UserRole + 3)
         }
+
+    def show_pinned_items_dialog(self):
+        dlg = PinnedItemsDialog(self, cfg=self.cfg)
+        dlg.exec()
+        self.load_files_from_db()
+        self.refresh_status_background()
 
     def action_pin_selected(self):
         info = self.get_selected_file_info()

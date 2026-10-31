@@ -38,6 +38,7 @@ jobs:
           mkdir -p "${PKG_NAME}/bin" "${PKG_NAME}/src/gui" "${PKG_NAME}/packaging"
           cp target/release/gdsync "${PKG_NAME}/bin/"
           cp target/release/gdsyncd "${PKG_NAME}/bin/"
+          cp src/actions.py "${PKG_NAME}/src/"
           cp src/gui/main.py "${PKG_NAME}/src/gui/"
           cp -r packaging/* "${PKG_NAME}/packaging/"
           cp install.sh "${PKG_NAME}/"
