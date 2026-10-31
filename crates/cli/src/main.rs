@@ -335,7 +335,42 @@ async fn main() -> Result<()> {
                     db.cache_total()? as f64 / 1_000_000.0,
                     cfg.cache_max_gb
                 );
-                println!("Cola de subidas:      {} tarea(s) pendiente(s)", db.pending_uploads_count()?);
+                let summary = db.pending_uploads_summary().unwrap_or_default();
+                if summary.total == 0 {
+                    println!("Cola de sincronización: 0 tareas pendientes (Todo al día)");
+                } else {
+                    let size_str = if summary.upload_bytes >= 1_000_000_000 {
+                        format!("{:.2} GB", summary.upload_bytes as f64 / 1_000_000_000.0)
+                    } else if summary.upload_bytes >= 1_000_000 {
+                        format!("{:.2} MB", summary.upload_bytes as f64 / 1_000_000.0)
+                    } else if summary.upload_bytes >= 1024 {
+                        format!("{:.1} KB", summary.upload_bytes as f64 / 1024.0)
+                    } else {
+                        format!("{} B", summary.upload_bytes)
+                    };
+
+                    if summary.uploads > 0 && summary.trashes > 0 {
+                        println!(
+                            "Cola de sincronización: {} tarea(s) pendiente(s) ({} subidas: {size_str}, {} en papelera)",
+                            summary.total, summary.uploads, summary.trashes
+                        );
+                    } else if summary.uploads > 0 {
+                        println!(
+                            "Cola de sincronización: {} archivo(s) por subir ({size_str})",
+                            summary.uploads
+                        );
+                    } else if summary.trashes > 0 {
+                        println!(
+                            "Cola de sincronización: {} elemento(s) enviándose a la papelera (0 B por subir)",
+                            summary.trashes
+                        );
+                    } else {
+                        println!(
+                            "Cola de sincronización: {} tarea(s) pendiente(s)",
+                            summary.total
+                        );
+                    }
+                }
                 if let (Ok(Some(tot)), Ok(Some(used))) = (db.kv_get("storage_total"), db.kv_get("storage_used")) {
                     if let (Ok(tot_b), Ok(used_b)) = (tot.parse::<u64>(), used.parse::<u64>()) {
                         println!(

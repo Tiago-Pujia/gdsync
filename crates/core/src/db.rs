@@ -81,6 +81,15 @@ fn upload_row(r: &Row) -> rusqlite::Result<UploadTask> {
     })
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueueSummary {
+    pub total: u64,
+    pub uploads: u64,
+    pub upload_bytes: u64,
+    pub trashes: u64,
+    pub others: u64,
+}
+
 pub struct Db {
     conn: Mutex<Connection>,
 }
@@ -347,6 +356,31 @@ impl Db {
 
     pub fn enqueue_upload(&self, file_id: &str, op: &str, payload: Option<&str>) -> Result<i64> {
         let conn = self.conn();
+        // Coalesce / deduplicate pending upload tasks
+        if op == "update" {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM upload_queue WHERE file_id=?1 AND status='pending' AND op IN ('create', 'update'))",
+                    [file_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            if exists {
+                return Ok(0);
+            }
+        } else if op == "create" {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM upload_queue WHERE file_id=?1 AND status='pending' AND op='create')",
+                    [file_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            if exists {
+                return Ok(0);
+            }
+        }
+
         conn.execute(
             "INSERT INTO upload_queue(file_id, op, payload, status, created_at)
              VALUES(?1, ?2, ?3, 'pending', ?4)",
@@ -382,12 +416,45 @@ impl Db {
         Ok(())
     }
 
+    pub fn cancel_pending_updates(&self, file_id: &str) -> Result<()> {
+        self.conn().execute(
+            "DELETE FROM upload_queue WHERE file_id=?1 AND op='update' AND status='pending'",
+            [file_id],
+        )?;
+        Ok(())
+    }
+
     pub fn pending_uploads_count(&self) -> Result<u64> {
         Ok(self.conn().query_row(
             "SELECT COUNT(*) FROM upload_queue WHERE status='pending'",
             [],
             |r| r.get::<_, i64>(0),
         )? as u64)
+    }
+
+    pub fn pending_uploads_summary(&self) -> Result<QueueSummary> {
+        let (total, uploads, bytes, trashes, others): (i64, i64, i64, i64, i64) = self.conn().query_row(
+            "SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN q.op IN ('create', 'update') THEN 1 ELSE 0 END), 0),
+                (SELECT COALESCE(SUM(i.size), 0)
+                 FROM items i
+                 WHERE i.id IN (SELECT DISTINCT file_id FROM upload_queue WHERE status='pending' AND op IN ('create', 'update'))
+                ),
+                COALESCE(SUM(CASE WHEN q.op = 'trash' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN q.op NOT IN ('create', 'update', 'trash') THEN 1 ELSE 0 END), 0)
+             FROM upload_queue q
+             WHERE q.status = 'pending'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?;
+        Ok(QueueSummary {
+            total: total as u64,
+            uploads: uploads as u64,
+            upload_bytes: bytes as u64,
+            trashes: trashes as u64,
+            others: others as u64,
+        })
     }
 
     // ---- key/value ----
@@ -546,6 +613,23 @@ mod tests {
         let _id2 = db.enqueue_upload("file_2", "update", None).unwrap();
         assert_eq!(db.pending_uploads_count().unwrap(), 2);
 
+        // Deduplication tests:
+        let dup_create = db.enqueue_upload("file_1", "create", None).unwrap();
+        assert_eq!(dup_create, 0);
+        let dup_update1 = db.enqueue_upload("file_1", "update", None).unwrap();
+        assert_eq!(dup_update1, 0);
+        let dup_update2 = db.enqueue_upload("file_2", "update", None).unwrap();
+        assert_eq!(dup_update2, 0);
+        assert_eq!(db.pending_uploads_count().unwrap(), 2);
+
+        // Summary test
+        let _ = db.insert_local_item("file_1", None, "test.txt", "text/plain", 1024, 0).unwrap();
+        let _ = db.insert_local_item("file_2", None, "file2.txt", "text/plain", 2048, 0).unwrap();
+        let summary = db.pending_uploads_summary().unwrap();
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.uploads, 2);
+        assert_eq!(summary.upload_bytes, 3072);
+
         let tasks = db.peek_pending_uploads(10).unwrap();
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].id, id1);
@@ -557,6 +641,9 @@ mod tests {
 
         let remaining = db.peek_pending_uploads(10).unwrap();
         assert_eq!(remaining[0].file_id, "file_2");
+
+        db.cancel_pending_updates("file_2").unwrap();
+        assert_eq!(db.pending_uploads_count().unwrap(), 0);
     }
 
     #[test]

@@ -819,8 +819,8 @@ class GdsyncWindow(QMainWindow):
         layout.addWidget(lbl)
 
         self.table_queue = QTableWidget()
-        self.table_queue.setColumnCount(6)
-        self.table_queue.setHorizontalHeaderLabels(["ID", "Operación", "Archivo / Elemento", "Estado", "Intentos", "Fecha"])
+        self.table_queue.setColumnCount(7)
+        self.table_queue.setHorizontalHeaderLabels(["ID", "Operación", "Archivo / Elemento", "Tamaño", "Estado", "Intentos", "Fecha"])
         self.table_queue.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table_queue.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_queue.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -1135,16 +1135,27 @@ class GdsyncWindow(QMainWindow):
                 icon = QSystemTrayIcon.MessageIcon.Warning if is_warning else QSystemTrayIcon.MessageIcon.Information
                 self.tray.showMessage(title, message, icon, 4000)
 
-    def update_queue_notification(self, pending: int):
+    def update_queue_notification(self, total: int, uploads: int = 0, upload_bytes: int = 0, trashes: int = 0):
         notifications_on = self.cfg.get("notifications_enabled", True)
         persistent_on = self.cfg.get("persistent_upload_notify", True)
 
+        if total == 0:
+            status_text = "Todo sincronizado"
+        elif uploads > 0 and trashes > 0:
+            status_text = f"{uploads} por subir ({format_bytes(upload_bytes)}), {trashes} en papelera"
+        elif uploads > 0:
+            status_text = f"Subiendo {uploads} archivo(s): {format_bytes(upload_bytes)}"
+        elif trashes > 0:
+            status_text = f"Enviando {trashes} elemento(s) a la papelera (0 B por subir)"
+        else:
+            status_text = f"{total} tareas pendientes"
+
         # Actualizar tooltip e indicador en la bandeja del sistema (System Tray)
         if hasattr(self, "tray") and self.tray:
-            if pending > 0:
-                self.tray.setToolTip(f"gdsync - Tareas pendientes de subida: {pending}")
+            if total > 0:
+                self.tray.setToolTip(f"gdsync - {status_text}")
                 if hasattr(self, "tray_status_action"):
-                    self.tray_status_action.setText(f"Tareas pendientes de subida: {pending}")
+                    self.tray_status_action.setText(status_text)
             else:
                 self.tray.setToolTip("gdsync - Todo sincronizado")
                 if hasattr(self, "tray_status_action"):
@@ -1155,8 +1166,9 @@ class GdsyncWindow(QMainWindow):
                 self.close_queue_notification()
             return
 
-        if pending > 0:
-            if self.queue_notification_id is not None and self.last_notified_pending == pending:
+        current_key = (total, uploads, upload_bytes, trashes)
+        if total > 0:
+            if self.queue_notification_id is not None and self.last_notified_pending == current_key:
                 return
 
             cmd = [
@@ -1171,7 +1183,7 @@ class GdsyncWindow(QMainWindow):
             ]
             if self.queue_notification_id:
                 cmd.extend(["-r", str(self.queue_notification_id)])
-            cmd.extend(["gdsync", f"Tareas pendientes de subida: {pending}"])
+            cmd.extend(["gdsync", status_text])
 
             try:
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
@@ -1179,13 +1191,13 @@ class GdsyncWindow(QMainWindow):
                     out = res.stdout.strip()
                     if out.isdigit():
                         self.queue_notification_id = int(out)
-                    self.last_notified_pending = pending
+                    self.last_notified_pending = current_key
             except Exception:
                 pass
 
         else:
             # pending == 0
-            if self.queue_notification_id is not None or (self.last_notified_pending is not None and self.last_notified_pending > 0):
+            if self.queue_notification_id is not None or (self.last_notified_pending is not None and self.last_notified_pending != 0):
                 cmd = [
                     "notify-send",
                     "-t", "5000",
@@ -1305,10 +1317,42 @@ class GdsyncWindow(QMainWindow):
                 pinned_cnt = cur.fetchone()[0]
                 self.lbl_pinned_count.setText(f"Archivos disponibles sin conexión (anclados): <b>{pinned_cnt}</b>")
 
-                cur.execute("SELECT COUNT(*) FROM upload_queue WHERE status='pending'")
-                pending = cur.fetchone()[0]
-                self.lbl_upload_queue.setText(f"Tareas pendientes de subida: <b>{pending}</b>")
-                self.update_queue_notification(pending)
+                cur.execute("""
+                    SELECT
+                        COUNT(*),
+                        COALESCE(SUM(CASE WHEN q.op IN ('create', 'update') THEN 1 ELSE 0 END), 0),
+                        (SELECT COALESCE(SUM(i.size), 0)
+                         FROM items i
+                         WHERE i.id IN (SELECT DISTINCT file_id FROM upload_queue WHERE status='pending' AND op IN ('create', 'update'))
+                        ),
+                        COALESCE(SUM(CASE WHEN q.op = 'trash' THEN 1 ELSE 0 END), 0)
+                    FROM upload_queue q
+                    WHERE q.status = 'pending'
+                """)
+                summary_row = cur.fetchone()
+                tot_pending = summary_row[0] if summary_row else 0
+                uploads_cnt = summary_row[1] if summary_row else 0
+                upload_bytes = summary_row[2] if summary_row else 0
+                trash_cnt = summary_row[3] if summary_row else 0
+
+                if tot_pending == 0:
+                    self.lbl_upload_queue.setText("Tareas pendientes de sincronización: <b>0</b> (Todo al día)")
+                elif uploads_cnt > 0 and trash_cnt > 0:
+                    self.lbl_upload_queue.setText(
+                        f"Tareas pendientes: <b>{tot_pending}</b> ({uploads_cnt} por subir: <b>{format_bytes(upload_bytes)}</b> | {trash_cnt} en papelera)"
+                    )
+                elif uploads_cnt > 0:
+                    self.lbl_upload_queue.setText(
+                        f"Tareas pendientes de subida: <b>{uploads_cnt}</b> (<b>{format_bytes(upload_bytes)}</b> por subir)"
+                    )
+                elif trash_cnt > 0:
+                    self.lbl_upload_queue.setText(
+                        f"Tareas pendientes: <b>{tot_pending}</b> ({trash_cnt} enviándose a la papelera | 0 B por subir)"
+                    )
+                else:
+                    self.lbl_upload_queue.setText(f"Tareas pendientes: <b>{tot_pending}</b>")
+
+                self.update_queue_notification(tot_pending, uploads_cnt, upload_bytes, trash_cnt)
 
                 cur.execute("SELECT key, value FROM kv WHERE key IN ('storage_total', 'storage_used')")
                 kv_rows = dict(cur.fetchall())
@@ -1623,30 +1667,87 @@ class GdsyncWindow(QMainWindow):
         try:
             conn = sqlite3.connect(f"file:{dbp}?mode=ro", uri=True)
             cur = conn.cursor()
-            cur.execute("SELECT id, op, file_id, status, attempts, created_at FROM upload_queue ORDER BY id DESC LIMIT 50")
+            cur.execute("""
+                SELECT q.id, q.op, q.file_id, i.name, q.payload, i.size, q.status, q.attempts, q.created_at
+                FROM upload_queue q
+                LEFT JOIN items i ON q.file_id = i.id
+                ORDER BY q.id DESC LIMIT 50
+            """)
             rows = cur.fetchall()
+
+            cur.execute("""
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(CASE WHEN q.op IN ('create', 'update') THEN 1 ELSE 0 END), 0),
+                    (SELECT COALESCE(SUM(i.size), 0)
+                     FROM items i
+                     WHERE i.id IN (SELECT DISTINCT file_id FROM upload_queue WHERE status='pending' AND op IN ('create', 'update'))
+                    ),
+                    COALESCE(SUM(CASE WHEN q.op = 'trash' THEN 1 ELSE 0 END), 0)
+                FROM upload_queue q
+                WHERE q.status = 'pending'
+            """)
+            summary_row = cur.fetchone()
+            tot_pending = summary_row[0] if summary_row else 0
+            uploads_cnt = summary_row[1] if summary_row else 0
+            upload_bytes = summary_row[2] if summary_row else 0
+            trash_cnt = summary_row[3] if summary_row else 0
             conn.close()
         except Exception as e:
             self.lbl_queue_status.setText(f"Error consultando cola: {e}")
             return
 
         self.table_queue.setRowCount(len(rows))
-        for row_idx, (qid, op, fid, status, attempts, created) in enumerate(rows):
+        for row_idx, (qid, op, fid, iname, payload, fsize, status, attempts, created) in enumerate(rows):
             dt_str = datetime.fromtimestamp(created).strftime("%Y-%m-%d %H:%M:%S") if created else "—"
+
+            fname = iname
+            if not fname and payload:
+                try:
+                    p = json.loads(payload)
+                    fname = p.get("name")
+                except Exception:
+                    pass
+            display_name = f"{fname} ({fid})" if fname and fname != fid else fid
+
+            op_lower = op.lower()
+            if op_lower in ("create", "update"):
+                size_str = format_bytes(fsize) if fsize is not None and fsize > 0 else "0 B"
+            elif op_lower == "trash":
+                size_str = "Papelera (0 B)"
+            elif op_lower == "mkdir":
+                size_str = "Carpeta"
+            else:
+                size_str = "Metadatos"
+
             self.table_queue.setItem(row_idx, 0, QTableWidgetItem(str(qid)))
             self.table_queue.setItem(row_idx, 1, QTableWidgetItem(op.upper()))
-            self.table_queue.setItem(row_idx, 2, QTableWidgetItem(fid))
-            self.table_queue.setItem(row_idx, 3, QTableWidgetItem(status))
-            self.table_queue.setItem(row_idx, 4, QTableWidgetItem(str(attempts)))
-            self.table_queue.setItem(row_idx, 5, QTableWidgetItem(dt_str))
+            self.table_queue.setItem(row_idx, 2, QTableWidgetItem(display_name))
+            self.table_queue.setItem(row_idx, 3, QTableWidgetItem(size_str))
+            self.table_queue.setItem(row_idx, 4, QTableWidgetItem(status))
+            self.table_queue.setItem(row_idx, 5, QTableWidgetItem(str(attempts)))
+            self.table_queue.setItem(row_idx, 6, QTableWidgetItem(dt_str))
 
-        current_pending = sum(1 for r in rows if r[3] in ("pending", "uploading"))
-        self.previous_pending_uploads = current_pending
+        self.previous_pending_uploads = tot_pending
 
-        if not rows or current_pending == 0:
+        if not rows or tot_pending == 0:
             self.lbl_queue_status.setText("✅ Todo sincronizado. No hay tareas pendientes en la cola.")
+        elif uploads_cnt > 0 and trash_cnt > 0:
+            self.lbl_queue_status.setText(
+                f"Cola: {len(rows)} tareas recientes ({uploads_cnt} subidas: {format_bytes(upload_bytes)}, {trash_cnt} en papelera)."
+            )
+        elif uploads_cnt > 0:
+            self.lbl_queue_status.setText(
+                f"Cola: {len(rows)} tareas recientes ({uploads_cnt} archivos por subir: {format_bytes(upload_bytes)})."
+            )
+        elif trash_cnt > 0:
+            self.lbl_queue_status.setText(
+                f"Cola: {len(rows)} tareas recientes ({trash_cnt} enviándose a papelera | 0 B por subir)."
+            )
         else:
-            self.lbl_queue_status.setText(f"Cola de subidas: {len(rows)} tareas registradas recientemente ({current_pending} pendientes).")
+            self.lbl_queue_status.setText(
+                f"Cola: {len(rows)} tareas recientes ({tot_pending} pendientes)."
+            )
 
     # ---- PESTAÑA SINCRONIZACIÓN SELECTIVA ----
     def sync_all_clicked(self):

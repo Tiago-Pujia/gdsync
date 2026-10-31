@@ -66,10 +66,13 @@ fn main() -> Result<()> {
 
     rt.block_on(sync::initial_sync(&drive, &db, &cfg))?;
 
+    let upload_notify = Arc::new(tokio::sync::Notify::new());
+
     // Background worker: upload queue + remote changes polling + quota refresh
     {
         let (drive, db, cache, cfg_clone) = (drive.clone(), db.clone(), cache.clone(), cfg.clone());
         let (total_s, used_s) = (total_space.clone(), used_space.clone());
+        let upload_notify = upload_notify.clone();
 
         rt.spawn(async move {
             let mut tick = 0u64;
@@ -128,7 +131,10 @@ fn main() -> Result<()> {
                     }
                 }
 
-                tokio::time::sleep(sleep_duration).await;
+                tokio::select! {
+                    _ = upload_notify.notified() => {}
+                    _ = tokio::time::sleep(sleep_duration) => {}
+                }
             }
         });
     }
@@ -141,7 +147,7 @@ fn main() -> Result<()> {
         MountOption::NoAtime,
         MountOption::DefaultPermissions,
     ];
-    let fs = fs::DriveFs::new(db, cache, rt.handle().clone(), total_space, used_space);
+    let fs = fs::DriveFs::new(db, cache, rt.handle().clone(), total_space, used_space, upload_notify);
     let session = fuser::spawn_mount2(fs, &mount, &options)
         .with_context(|| format!("no se pudo montar en {}", mount.display()))?;
     info!("Google Drive montado en modo lectura/escritura en {}", mount.display());

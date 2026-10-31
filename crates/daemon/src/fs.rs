@@ -37,6 +37,7 @@ pub struct DriveFs {
     gid: u32,
     total_space: Arc<AtomicU64>,
     used_space: Arc<AtomicU64>,
+    notify_upload: Arc<tokio::sync::Notify>,
 }
 
 impl DriveFs {
@@ -46,6 +47,7 @@ impl DriveFs {
         rt: Handle,
         total_space: Arc<AtomicU64>,
         used_space: Arc<AtomicU64>,
+        notify_upload: Arc<tokio::sync::Notify>,
     ) -> Self {
         // SAFETY: getuid/getgid have no preconditions.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
@@ -59,6 +61,15 @@ impl DriveFs {
             gid,
             total_space,
             used_space,
+            notify_upload,
+        }
+    }
+
+    fn enqueue(&self, file_id: &str, op: &str, payload: Option<&str>) {
+        if let Ok(id) = self.db.enqueue_upload(file_id, op, payload) {
+            if id > 0 {
+                self.notify_upload.notify_one();
+            }
         }
     }
 
@@ -198,7 +209,7 @@ impl Filesystem for DriveFs {
                 let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_len(new_size));
             }
             let _ = self.db.update_item_size_mtime(&item.id, new_size, gdsync_core::now());
-            let _ = self.db.enqueue_upload(&item.id, "update", None);
+            self.enqueue(&item.id, "update", None);
         }
         let updated = self.item(ino).unwrap_or(item);
         reply.attr(&TTL, &self.attr(&updated));
@@ -313,7 +324,7 @@ impl Filesystem for DriveFs {
         };
         let Some(created_item) = self.item(ino) else { return reply.error(EIO) };
         let _ = self.db.cache_put(&local_id, &created_item.version(), 0);
-        let _ = self.db.enqueue_upload(&local_id, "create", None);
+        self.enqueue(&local_id, "create", None);
 
         let fh = self.new_handle(OpenFile::DiskRw { file, item_id: local_id.clone(), dirty: true });
         reply.created(&TTL, &self.attr(&created_item), 0, fh, 0);
@@ -333,7 +344,7 @@ impl Filesystem for DriveFs {
             Ok(i) => i,
             Err(_) => return reply.error(EIO),
         };
-        let _ = self.db.enqueue_upload(&local_id, "mkdir", None);
+        self.enqueue(&local_id, "mkdir", None);
 
         let Some(created_item) = self.item(ino) else { return reply.error(EIO) };
         reply.entry(&TTL, &self.attr(&created_item), 0);
@@ -401,7 +412,7 @@ impl Filesystem for DriveFs {
         let mut handles = self.handles.lock().unwrap();
         if let Some(OpenFile::DiskRw { item_id, dirty, .. }) = handles.get_mut(&fh) {
             if *dirty {
-                let _ = self.db.enqueue_upload(item_id, "update", None);
+                self.enqueue(item_id, "update", None);
                 *dirty = false;
             }
         }
@@ -421,7 +432,7 @@ impl Filesystem for DriveFs {
         let mut handles = self.handles.lock().unwrap();
         if let Some(OpenFile::DiskRw { item_id, dirty, .. }) = handles.remove(&fh) {
             if dirty {
-                let _ = self.db.enqueue_upload(&item_id, "update", None);
+                self.enqueue(&item_id, "update", None);
             }
         }
         reply.ok();
@@ -441,12 +452,13 @@ impl Filesystem for DriveFs {
             return reply.error(EISDIR);
         }
 
+        let payload = serde_json::json!({ "name": item.name }).to_string();
         let _ = self.db.remove(&item.id);
         self.cache.forget(&item.id);
         if item.id.starts_with("local_") {
             let _ = self.db.cancel_uploads(&item.id);
         } else {
-            let _ = self.db.enqueue_upload(&item.id, "trash", None);
+            self.enqueue(&item.id, "trash", Some(&payload));
         }
         reply.ok();
     }
@@ -470,11 +482,12 @@ impl Filesystem for DriveFs {
             return reply.error(ENOTEMPTY);
         }
 
+        let payload = serde_json::json!({ "name": item.name }).to_string();
         let _ = self.db.remove(&item.id);
         if item.id.starts_with("local_") {
             let _ = self.db.cancel_uploads(&item.id);
         } else {
-            let _ = self.db.enqueue_upload(&item.id, "trash", None);
+            self.enqueue(&item.id, "trash", Some(&payload));
         }
         reply.ok();
     }
@@ -542,7 +555,7 @@ impl Filesystem for DriveFs {
                 let _ = std::fs::rename(self.cache.path(&item.id), self.cache.path(&existing.id));
                 let _ = self.db.cache_put(&existing.id, &format!("mtime:{now}"), file_size);
                 let _ = self.db.cancel_uploads(&item.id);
-                let _ = self.db.enqueue_upload(&existing.id, "update", None);
+                self.enqueue(&existing.id, "update", None);
                 return reply.ok();
             }
 
@@ -552,7 +565,7 @@ impl Filesystem for DriveFs {
             if existing.id.starts_with("local_") {
                 let _ = self.db.cancel_uploads(&existing.id);
             } else {
-                let _ = self.db.enqueue_upload(&existing.id, "trash", None);
+                self.enqueue(&existing.id, "trash", None);
             }
         }
 
@@ -564,14 +577,14 @@ impl Filesystem for DriveFs {
         if !item.id.starts_with("local_") {
             if item.name != newname_str {
                 let payload = serde_json::json!({ "name": newname_str }).to_string();
-                let _ = self.db.enqueue_upload(&item.id, "rename", Some(&payload));
+                self.enqueue(&item.id, "rename", Some(&payload));
             }
             if parent != newparent {
                 let payload = serde_json::json!({
                     "new_parent": newparent_item.id,
                     "old_parent": parent_item.id,
                 }).to_string();
-                let _ = self.db.enqueue_upload(&item.id, "move", Some(&payload));
+                self.enqueue(&item.id, "move", Some(&payload));
             }
         }
 
