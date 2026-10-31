@@ -29,6 +29,9 @@ impl Cache {
 
     /// True if there's a local copy matching the current remote version.
     pub fn is_fresh(&self, item: &Item) -> bool {
+        if item.id.starts_with("local_") && self.path(&item.id).exists() {
+            return true;
+        }
         matches!(self.db.cache_version(&item.id), Ok(Some(v)) if v == item.version())
             && self.path(&item.id).exists()
     }
@@ -39,6 +42,17 @@ impl Cache {
         if self.is_fresh(item) {
             self.db.cache_touch(&item.id)?;
             return Ok(path);
+        }
+        if item.id.starts_with("local_") {
+            if path.exists() {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let _ = self.db.cache_put(&item.id, &item.version(), size);
+                return Ok(path);
+            } else {
+                std::fs::File::create(&path)?;
+                let _ = self.db.cache_put(&item.id, &item.version(), 0);
+                return Ok(path);
+            }
         }
         let lock = self
             .inflight

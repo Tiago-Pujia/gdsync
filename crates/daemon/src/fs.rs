@@ -311,11 +311,11 @@ impl Filesystem for DriveFs {
             Ok(i) => i,
             Err(_) => return reply.error(EIO),
         };
-        let _ = self.db.cache_put(&local_id, "local", 0);
+        let Some(created_item) = self.item(ino) else { return reply.error(EIO) };
+        let _ = self.db.cache_put(&local_id, &created_item.version(), 0);
         let _ = self.db.enqueue_upload(&local_id, "create", None);
 
         let fh = self.new_handle(OpenFile::DiskRw { file, item_id: local_id.clone(), dirty: true });
-        let Some(created_item) = self.item(ino) else { return reply.error(EIO) };
         reply.created(&TTL, &self.attr(&created_item), 0, fh, 0);
     }
 
@@ -443,7 +443,11 @@ impl Filesystem for DriveFs {
 
         let _ = self.db.remove(&item.id);
         self.cache.forget(&item.id);
-        let _ = self.db.enqueue_upload(&item.id, "trash", None);
+        if item.id.starts_with("local_") {
+            let _ = self.db.cancel_uploads(&item.id);
+        } else {
+            let _ = self.db.enqueue_upload(&item.id, "trash", None);
+        }
         reply.ok();
     }
 
@@ -467,7 +471,11 @@ impl Filesystem for DriveFs {
         }
 
         let _ = self.db.remove(&item.id);
-        let _ = self.db.enqueue_upload(&item.id, "trash", None);
+        if item.id.starts_with("local_") {
+            let _ = self.db.cancel_uploads(&item.id);
+        } else {
+            let _ = self.db.enqueue_upload(&item.id, "trash", None);
+        }
         reply.ok();
     }
 

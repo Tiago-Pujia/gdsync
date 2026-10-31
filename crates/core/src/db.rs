@@ -251,6 +251,7 @@ impl Db {
     }
 
     pub fn replace_file_id(&self, old_id: &str, new_id: &str, md5: Option<&str>, mtime: i64) -> Result<()> {
+        let version = md5.map(|s| s.to_string()).unwrap_or_else(|| format!("mtime:{mtime}"));
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute(
@@ -262,8 +263,8 @@ impl Db {
             params![new_id, old_id],
         )?;
         tx.execute(
-            "UPDATE cache SET id=?1 WHERE id=?2",
-            params![new_id, old_id],
+            "UPDATE cache SET id=?1, version=?3 WHERE id=?2",
+            params![new_id, old_id, version],
         )?;
         tx.execute(
             "UPDATE upload_queue SET file_id=?1 WHERE file_id=?2",
@@ -345,6 +346,11 @@ impl Db {
 
     pub fn complete_upload(&self, id: i64) -> Result<()> {
         self.conn().execute("DELETE FROM upload_queue WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    pub fn cancel_uploads(&self, file_id: &str) -> Result<()> {
+        self.conn().execute("DELETE FROM upload_queue WHERE file_id=?1", [file_id])?;
         Ok(())
     }
 

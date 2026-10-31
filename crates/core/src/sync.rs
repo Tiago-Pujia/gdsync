@@ -107,8 +107,16 @@ pub async fn process_upload_queue(drive: &Drive, db: &Db, cache: &Cache) -> Resu
         let res: Result<()> = async {
             match task.op.as_str() {
                 "create" => {
-                    let item = db.by_id(&task.file_id)?.context("elemento local no encontrado")?;
+                    let Some(item) = db.by_id(&task.file_id)? else {
+                        info!("elemento local '{}' fue eliminado antes de subir; descartando tarea #{}", task.file_id, task.id);
+                        db.complete_upload(task.id)?;
+                        done += 1;
+                        return Ok(());
+                    };
                     let parent_id = item.parent_id.as_deref().unwrap_or("root");
+                    if parent_id.starts_with("local_") {
+                        anyhow::bail!("esperando a que el directorio padre '{}' se suba antes de subir '{}'", parent_id, item.name);
+                    }
                     let local_path = cache.path(&task.file_id);
                     info!("subiendo nuevo archivo '{}' desde '{}'", item.name, local_path.display());
                     let remote = if local_path.exists() {
@@ -126,7 +134,15 @@ pub async fn process_upload_queue(drive: &Drive, db: &Db, cache: &Cache) -> Resu
                     done += 1;
                 }
                 "update" => {
-                    let item = db.by_id(&task.file_id)?.context("elemento no encontrado")?;
+                    let Some(item) = db.by_id(&task.file_id)? else {
+                        info!("elemento '{}' no encontrado para actualizar; descartando tarea #{}", task.file_id, task.id);
+                        db.complete_upload(task.id)?;
+                        done += 1;
+                        return Ok(());
+                    };
+                    if task.file_id.starts_with("local_") {
+                        anyhow::bail!("esperando a que se complete la subida inicial de '{}'", task.file_id);
+                    }
                     let local_path = cache.path(&task.file_id);
                     if local_path.exists() {
                         let meta = tokio::fs::metadata(&local_path).await?;
@@ -140,8 +156,16 @@ pub async fn process_upload_queue(drive: &Drive, db: &Db, cache: &Cache) -> Resu
                     done += 1;
                 }
                 "mkdir" => {
-                    let item = db.by_id(&task.file_id)?.context("carpeta local no encontrada")?;
+                    let Some(item) = db.by_id(&task.file_id)? else {
+                        info!("carpeta local '{}' fue eliminada antes de crear; descartando tarea #{}", task.file_id, task.id);
+                        db.complete_upload(task.id)?;
+                        done += 1;
+                        return Ok(());
+                    };
                     let parent_id = item.parent_id.as_deref().unwrap_or("root");
+                    if parent_id.starts_with("local_") {
+                        anyhow::bail!("esperando a que el directorio padre '{}' se cree en Drive antes de crear '{}'", parent_id, item.name);
+                    }
                     info!("creando carpeta remota '{}'", item.name);
                     let remote = drive.create_remote_folder(&item.name, parent_id).await?;
                     let mtime = remote.modified_time.as_deref().and_then(crate::db::parse_rfc3339).unwrap_or(0);
@@ -195,7 +219,8 @@ pub async fn process_upload_queue(drive: &Drive, db: &Db, cache: &Cache) -> Resu
 
         if let Err(e) = res {
             tracing::warn!("error procesando subida de tarea #{}: {e:#}", task.id);
-            let _ = db.update_upload_status(task.id, "pending", Some(&e.to_string()));
+            let next_status = if task.attempts >= 4 { "failed" } else { "pending" };
+            let _ = db.update_upload_status(task.id, next_status, Some(&e.to_string()));
         }
     }
     Ok(done)

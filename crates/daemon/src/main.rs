@@ -78,21 +78,30 @@ fn main() -> Result<()> {
                 let active_cfg = Config::load().unwrap_or_else(|_| cfg_clone.clone());
                 let sleep_duration = Duration::from_secs(active_cfg.poll_interval_secs.max(5));
 
-                // 1. Process pending local uploads first
-                match sync::process_upload_queue(&drive, &db, &cache).await {
-                    Ok(0) => {}
-                    Ok(n) => {
-                        info!("{n} tareas locales subidas a Drive");
-                        let _ = std::process::Command::new("notify-send")
-                            .args([
-                                "-a", "gdsync",
-                                "-i", "gdsync",
-                                "gdsync",
-                                &format!("{n} archivo(s) sincronizado(s) con Google Drive."),
-                            ])
-                            .spawn();
+                // 1. Process pending local uploads first (drain queue continuously)
+                let mut total_uploaded = 0;
+                loop {
+                    match sync::process_upload_queue(&drive, &db, &cache).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            total_uploaded += n;
+                            info!("{n} tareas locales subidas a Drive (acumulado: {total_uploaded})");
+                        }
+                        Err(e) => {
+                            warn!("error procesando cola de subida: {e:#}");
+                            break;
+                        }
                     }
-                    Err(e) => warn!("error procesando cola de subida: {e:#}"),
+                }
+                if total_uploaded > 0 {
+                    let _ = std::process::Command::new("notify-send")
+                        .args([
+                            "-a", "gdsync",
+                            "-i", "gdsync",
+                            "gdsync",
+                            &format!("{total_uploaded} archivo(s) sincronizado(s) con Google Drive."),
+                        ])
+                        .spawn();
                 }
 
                 // 2. Poll remote changes
