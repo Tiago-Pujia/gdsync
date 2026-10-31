@@ -486,7 +486,7 @@ impl Filesystem for DriveFs {
         name: &OsStr,
         newparent: u64,
         newname: &OsStr,
-        _flags: u32,
+        flags: u32,
         reply: ReplyEmpty,
     ) {
         let Some(parent_item) = self.item(parent) else { return reply.error(ENOENT) };
@@ -508,8 +508,51 @@ impl Filesystem for DriveFs {
 
         // Check if destination already exists
         if let Ok(Some(existing)) = self.db.lookup_child(&newparent_item.id, &newname_str) {
-            if existing.id != item.id {
+            if existing.id == item.id {
+                return reply.ok();
+            }
+
+            let flags_noreplace = (flags & 1) != 0; // libc::RENAME_NOREPLACE
+            if flags_noreplace {
                 return reply.error(EEXIST);
+            }
+
+            if item.is_dir() {
+                if !existing.is_dir() {
+                    return reply.error(ENOTDIR);
+                }
+                let children = self.db.children(&existing.id).unwrap_or_default();
+                if !children.is_empty() {
+                    return reply.error(ENOTEMPTY);
+                }
+            } else if existing.is_dir() {
+                return reply.error(EISDIR);
+            }
+
+            // Editor atomic save replacing an existing remote file:
+            // Adopt the existing remote ID so Google Drive updates the file in place
+            // rather than trashing it and creating an untracked new file ID.
+            if !existing.is_dir() && !item.is_dir() && !existing.id.starts_with("local_") && item.id.starts_with("local_") {
+                let now = gdsync_core::now();
+                let file_size = std::fs::metadata(self.cache.path(&item.id)).map(|m| m.len()).unwrap_or(item.size);
+                if let Err(e) = self.db.replace_existing_with_local(&existing.id, item.ino, &newname_str, &newparent_item.id, file_size, now) {
+                    warn!("error reemplazando archivo existente en db: {e:#}");
+                    return reply.error(EIO);
+                }
+                let _ = std::fs::rename(self.cache.path(&item.id), self.cache.path(&existing.id));
+                let _ = self.db.cache_put(&existing.id, &format!("mtime:{now}"), file_size);
+                let _ = self.db.cancel_uploads(&item.id);
+                let _ = self.db.enqueue_upload(&existing.id, "update", None);
+                return reply.ok();
+            }
+
+            // General replacement: delete existing destination
+            let _ = self.db.remove(&existing.id);
+            self.cache.forget(&existing.id);
+            if existing.id.starts_with("local_") {
+                let _ = self.db.cancel_uploads(&existing.id);
+            } else {
+                let _ = self.db.enqueue_upload(&existing.id, "trash", None);
             }
         }
 
@@ -518,16 +561,18 @@ impl Filesystem for DriveFs {
             return reply.error(EIO);
         }
 
-        if item.name != newname_str {
-            let payload = serde_json::json!({ "name": newname_str }).to_string();
-            let _ = self.db.enqueue_upload(&item.id, "rename", Some(&payload));
-        }
-        if parent != newparent {
-            let payload = serde_json::json!({
-                "new_parent": newparent_item.id,
-                "old_parent": parent_item.id,
-            }).to_string();
-            let _ = self.db.enqueue_upload(&item.id, "move", Some(&payload));
+        if !item.id.starts_with("local_") {
+            if item.name != newname_str {
+                let payload = serde_json::json!({ "name": newname_str }).to_string();
+                let _ = self.db.enqueue_upload(&item.id, "rename", Some(&payload));
+            }
+            if parent != newparent {
+                let payload = serde_json::json!({
+                    "new_parent": newparent_item.id,
+                    "old_parent": parent_item.id,
+                }).to_string();
+                let _ = self.db.enqueue_upload(&item.id, "move", Some(&payload));
+            }
         }
 
         reply.ok();

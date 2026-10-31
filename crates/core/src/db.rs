@@ -274,6 +274,34 @@ impl Db {
         Ok(())
     }
 
+    pub fn replace_existing_with_local(
+        &self,
+        existing_id: &str,
+        new_ino: u64,
+        new_name: &str,
+        parent_id: &str,
+        size: u64,
+        mtime: i64,
+    ) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let (web_link, pinned, mime): (Option<String>, i64, String) = tx
+            .query_row(
+                "SELECT web_link, pinned, mime FROM items WHERE id=?1",
+                [existing_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap_or((None, 0, "application/octet-stream".to_string()));
+
+        tx.execute("DELETE FROM items WHERE id=?1", [existing_id])?;
+        tx.execute(
+            "UPDATE items SET id=?1, name=?2, parent_id=?3, size=?4, md5=NULL, mtime=?5, web_link=?7, pinned=?8, mime=?9 WHERE ino=?6",
+            params![existing_id, new_name, parent_id, size as i64, mtime, new_ino as i64, web_link, pinned, mime],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<()> {
         self.conn().execute(
             "UPDATE items SET pinned=?2 WHERE id=?1",
@@ -597,5 +625,28 @@ mod tests {
 
         db.remove("remote_abc").unwrap();
         assert!(db.by_id("remote_abc").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_replace_existing_with_local() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_root(&rf("ROOT", "Mi unidad", "", FOLDER_MIME)).unwrap();
+        db.upsert(&rf("remote_doc", "nota.txt", "ROOT", "text/plain")).unwrap();
+        let existing = db.by_id("remote_doc").unwrap().unwrap();
+
+        // Local temp file created by editor
+        let temp_ino = db.insert_local_item("local_tmp", Some("ROOT"), ".nota.txt.goutputstream", "application/octet-stream", 42, 500).unwrap();
+
+        // Editor renames temp file over existing remote file
+        db.replace_existing_with_local("remote_doc", temp_ino, "nota.txt", "ROOT", 42, 500).unwrap();
+
+        // Old inode is gone, new inode now holds the remote ID with updated metadata
+        assert!(db.by_ino(existing.ino).unwrap().is_none());
+        let updated = db.by_ino(temp_ino).unwrap().unwrap();
+        assert_eq!(updated.id, "remote_doc");
+        assert_eq!(updated.name, "nota.txt");
+        assert_eq!(updated.size, 42);
+        assert_eq!(updated.mtime, 500);
+        assert_eq!(updated.mime, "text/plain");
     }
 }
