@@ -594,6 +594,9 @@ class GdsyncWindow(QMainWindow):
         self.cached_files_ids = set()
         self.previous_pending_uploads = None
         self.quota_notified = False
+        self.queue_notification_id = None
+        self.last_notified_pending = None
+        QApplication.instance().aboutToQuit.connect(self.close_queue_notification)
 
         ensure_dolphin_bookmark(self.cfg.get("mount_point", str(Path.home() / "GoogleDrive")))
 
@@ -1022,6 +1025,14 @@ class GdsyncWindow(QMainWindow):
         lbl_notify_hint = QLabel("  Te avisa cuando finaliza la subida de archivos o si tu cuota de Drive está casi llena.")
         lbl_notify_hint.setStyleSheet("color: gray; font-size: 11px;")
         notify_lay.addWidget(lbl_notify_hint)
+
+        self.chk_persistent_notify = QCheckBox("Notificación fija en el escritorio con tareas pendientes de subida")
+        self.chk_persistent_notify.setChecked(self.cfg.get("persistent_upload_notify", True))
+        self.chk_persistent_notify.toggled.connect(self.on_persistent_notify_toggled)
+        notify_lay.addWidget(self.chk_persistent_notify)
+        lbl_persist_hint = QLabel("  Mantiene una notificación persistente que se actualiza en vivo mientras haya archivos pendientes de subida.")
+        lbl_persist_hint.setStyleSheet("color: gray; font-size: 11px;")
+        notify_lay.addWidget(lbl_persist_hint)
         layout.addWidget(grp_notify)
 
         btn_save = QPushButton("Guardar configuración")
@@ -1077,20 +1088,12 @@ class GdsyncWindow(QMainWindow):
         self.tray.setIcon(load_app_icon())
         self.tray.setToolTip("gdsync - Google Drive")
 
-    def notify(self, title: str, message: str, is_warning: bool = False):
-        if not self.cfg.get("notifications_enabled", True):
-            return
-        icon = QSystemTrayIcon.MessageIcon.Warning if is_warning else QSystemTrayIcon.MessageIcon.Information
-        if hasattr(self, "tray") and self.tray and self.tray.isVisible():
-            self.tray.showMessage(title, message, icon, 4000)
-        else:
-            try:
-                urgency = "critical" if is_warning else "normal"
-                subprocess.Popen(["notify-send", "-a", "gdsync", "-u", urgency, "-i", "gdsync", title, message])
-            except Exception:
-                pass
-
         menu = QMenu()
+        self.tray_status_action = QAction("gdsync - Todo sincronizado", self)
+        self.tray_status_action.setEnabled(False)
+        menu.addAction(self.tray_status_action)
+        menu.addSeparator()
+
         act_open_dolphin = QAction("Abrir en Dolphin", self)
         act_open_dolphin.triggered.connect(self.open_in_dolphin)
         menu.addAction(act_open_dolphin)
@@ -1112,6 +1115,110 @@ class GdsyncWindow(QMainWindow):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    def notify(self, title: str, message: str, is_warning: bool = False):
+        if not self.cfg.get("notifications_enabled", True):
+            return
+        urgency = "critical" if is_warning else "normal"
+        try:
+            subprocess.Popen([
+                "notify-send",
+                "-a", "gdsync",
+                "-u", urgency,
+                "-i", "gdsync",
+                "-h", "string:desktop-entry:gdsync",
+                title,
+                message
+            ])
+        except Exception:
+            if hasattr(self, "tray") and self.tray and self.tray.isVisible():
+                icon = QSystemTrayIcon.MessageIcon.Warning if is_warning else QSystemTrayIcon.MessageIcon.Information
+                self.tray.showMessage(title, message, icon, 4000)
+
+    def update_queue_notification(self, pending: int):
+        notifications_on = self.cfg.get("notifications_enabled", True)
+        persistent_on = self.cfg.get("persistent_upload_notify", True)
+
+        # Actualizar tooltip e indicador en la bandeja del sistema (System Tray)
+        if hasattr(self, "tray") and self.tray:
+            if pending > 0:
+                self.tray.setToolTip(f"gdsync - Tareas pendientes de subida: {pending}")
+                if hasattr(self, "tray_status_action"):
+                    self.tray_status_action.setText(f"Tareas pendientes de subida: {pending}")
+            else:
+                self.tray.setToolTip("gdsync - Todo sincronizado")
+                if hasattr(self, "tray_status_action"):
+                    self.tray_status_action.setText("✅ Todo sincronizado")
+
+        if not notifications_on or not persistent_on:
+            if self.queue_notification_id is not None:
+                self.close_queue_notification()
+            return
+
+        if pending > 0:
+            if self.queue_notification_id is not None and self.last_notified_pending == pending:
+                return
+
+            cmd = [
+                "notify-send",
+                "-p",
+                "-t", "0",
+                "-h", "boolean:resident:true",
+                "-h", "string:desktop-entry:gdsync",
+                "-u", "low",
+                "-a", "gdsync",
+                "-i", "gdsync",
+            ]
+            if self.queue_notification_id:
+                cmd.extend(["-r", str(self.queue_notification_id)])
+            cmd.extend(["gdsync", f"Tareas pendientes de subida: {pending}"])
+
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+                if res.returncode == 0:
+                    out = res.stdout.strip()
+                    if out.isdigit():
+                        self.queue_notification_id = int(out)
+                    self.last_notified_pending = pending
+            except Exception:
+                pass
+
+        else:
+            # pending == 0
+            if self.queue_notification_id is not None or (self.last_notified_pending is not None and self.last_notified_pending > 0):
+                cmd = [
+                    "notify-send",
+                    "-t", "5000",
+                    "-u", "normal",
+                    "-h", "string:desktop-entry:gdsync",
+                    "-a", "gdsync",
+                    "-i", "gdsync",
+                ]
+                if self.queue_notification_id:
+                    cmd.extend(["-r", str(self.queue_notification_id)])
+                cmd.extend(["gdsync", "Todas las tareas pendientes fueron subidas a Google Drive con éxito."])
+                try:
+                    subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+                except Exception:
+                    pass
+                self.queue_notification_id = None
+                self.last_notified_pending = 0
+
+    def close_queue_notification(self):
+        if self.queue_notification_id is not None:
+            nid = str(self.queue_notification_id)
+            self.queue_notification_id = None
+            self.last_notified_pending = None
+            try:
+                subprocess.run(
+                    ["gdbus", "call", "--session", "--dest", "org.freedesktop.Notifications",
+                     "--object-path", "/org/freedesktop/Notifications",
+                     "--method", "org.freedesktop.Notifications.CloseNotification", nid],
+                    capture_output=True,
+                    timeout=2
+                )
+            except Exception:
+                pass
 
     def on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -1201,6 +1308,7 @@ class GdsyncWindow(QMainWindow):
                 cur.execute("SELECT COUNT(*) FROM upload_queue WHERE status='pending'")
                 pending = cur.fetchone()[0]
                 self.lbl_upload_queue.setText(f"Tareas pendientes de subida: <b>{pending}</b>")
+                self.update_queue_notification(pending)
 
                 cur.execute("SELECT key, value FROM kv WHERE key IN ('storage_total', 'storage_used')")
                 kv_rows = dict(cur.fetchall())
@@ -1533,8 +1641,6 @@ class GdsyncWindow(QMainWindow):
             self.table_queue.setItem(row_idx, 5, QTableWidgetItem(dt_str))
 
         current_pending = sum(1 for r in rows if r[3] in ("pending", "uploading"))
-        if self.previous_pending_uploads is not None and self.previous_pending_uploads > 0 and current_pending == 0:
-            self.notify("gdsync", "Todas las tareas pendientes fueron subidas a Google Drive con éxito.")
         self.previous_pending_uploads = current_pending
 
         if not rows or current_pending == 0:
@@ -1725,6 +1831,18 @@ class GdsyncWindow(QMainWindow):
     def on_notifications_toggled(self, checked: bool):
         self.cfg["notifications_enabled"] = checked
         save_config(self.cfg)
+        if not checked:
+            self.close_queue_notification()
+        else:
+            self.refresh_status_background()
+
+    def on_persistent_notify_toggled(self, checked: bool):
+        self.cfg["persistent_upload_notify"] = checked
+        save_config(self.cfg)
+        if not checked:
+            self.close_queue_notification()
+        else:
+            self.refresh_status_background()
 
     def save_settings(self):
         mount = self.txt_mount.text().strip()
@@ -1735,6 +1853,7 @@ class GdsyncWindow(QMainWindow):
         self.cfg["cache_max_gb"] = self.spin_cache.value()
         self.cfg["poll_interval_secs"] = self.spin_poll.value()
         self.cfg["notifications_enabled"] = self.chk_notifications.isChecked()
+        self.cfg["persistent_upload_notify"] = self.chk_persistent_notify.isChecked()
         save_config(self.cfg)
         set_gui_autostart(self.chk_autostart_gui.isChecked())
         set_daemon_autostart(self.chk_autostart_daemon.isChecked())

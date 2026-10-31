@@ -94,14 +94,20 @@ fn main() -> Result<()> {
                     }
                 }
                 if total_uploaded > 0 {
-                    let _ = std::process::Command::new("notify-send")
-                        .args([
-                            "-a", "gdsync",
-                            "-i", "gdsync",
-                            "gdsync",
-                            &format!("{total_uploaded} archivo(s) sincronizado(s) con Google Drive."),
-                        ])
-                        .spawn();
+                    let gui_active = std::path::Path::new("/tmp/gdsync_gui_ipc").exists()
+                        || std::env::var("XDG_RUNTIME_DIR")
+                            .map(|d| std::path::Path::new(&d).join("gdsync_gui_ipc").exists())
+                            .unwrap_or(false);
+                    if !gui_active {
+                        let _ = std::process::Command::new("notify-send")
+                            .args([
+                                "-a", "gdsync",
+                                "-i", "gdsync",
+                                "gdsync",
+                                &format!("{total_uploaded} archivo(s) sincronizado(s) con Google Drive."),
+                            ])
+                            .spawn();
+                    }
                 }
 
                 // 2. Poll remote changes
