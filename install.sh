@@ -18,9 +18,6 @@ echo "Destino de binarios: $BIN_DIR"
 if [ -f "bin/gdsync" ] && [ -f "bin/gdsyncd" ]; then
     SRC_GDSYNC="bin/gdsync"
     SRC_GDSYNCD="bin/gdsyncd"
-elif [ -f "target/release/gdsync" ] && [ -f "target/release/gdsyncd" ]; then
-    SRC_GDSYNC="target/release/gdsync"
-    SRC_GDSYNCD="target/release/gdsyncd"
 else
     echo "Compilando binarios con Cargo..."
     cargo build --workspace --release
@@ -48,28 +45,28 @@ chmod +x "$GDSYNC_DATA_DIR/actions.py"
 cp --remove-destination src/gui/main.py "$GDSYNC_DATA_DIR/gui/main.py"
 chmod +x "$GDSYNC_DATA_DIR/gui/main.py"
 
-cat << 'EOF' > "$BIN_DIR/gdsync"
+cat << EOF > "$BIN_DIR/gdsync"
 #!/bin/sh
-GDSYNC_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/gdsync"
+GDSYNC_DATA="\${XDG_DATA_HOME:-$SHARE_DIR}/gdsync"
 
-if [ "$1" = "gui" ]; then
+if [ "\$1" = "gui" ]; then
     shift
-    exec python3 "$GDSYNC_DATA/gui/main.py" "$@"
+    exec python3 "\$GDSYNC_DATA/gui/main.py" "\$@"
 fi
 
-if [ "$1" = "pin" ] || [ "$1" = "unpin" ] || [ "$1" = "pinned" ] || [ "$1" = "offline" ] || [ "$1" = "copy-link" ] || [ "$1" = "open-web" ]; then
-    if [ -f "$GDSYNC_DATA/actions.py" ]; then
-        exec python3 "$GDSYNC_DATA/actions.py" "$@"
+if [ "\$1" = "pin" ] || [ "\$1" = "unpin" ] || [ "\$1" = "pinned" ] || [ "\$1" = "offline" ] || [ "\$1" = "copy-link" ] || [ "\$1" = "open-web" ]; then
+    if [ -f "\$GDSYNC_DATA/actions.py" ]; then
+        exec python3 "\$GDSYNC_DATA/actions.py" "\$@"
     fi
 fi
 
-exec "$HOME/.local/bin/gdsync-bin" "$@"
+exec "$BIN_DIR/gdsync-bin" "\$@"
 EOF
 chmod +x "$BIN_DIR/gdsync"
 
-cat << 'EOF' > "$BIN_DIR/gdsync-gui"
+cat << EOF > "$BIN_DIR/gdsync-gui"
 #!/bin/sh
-exec python3 "${XDG_DATA_HOME:-$HOME/.local/share}/gdsync/gui/main.py" "$@"
+exec python3 "\${XDG_DATA_HOME:-$SHARE_DIR}/gdsync/gui/main.py" "\$@"
 EOF
 chmod +x "$BIN_DIR/gdsync-gui"
 
@@ -98,7 +95,7 @@ chmod +x "$APPLICATIONS_DIR/gdsync.desktop"
 
 # 8. Instalar servicio systemd de usuario
 echo "Instalando servicio systemd de usuario..."
-sed "s|%h/.cargo/bin/gdsyncd|$BIN_DIR/gdsyncd|g" packaging/systemd/gdsyncd.service > "$SYSTEMD_USER_DIR/gdsyncd.service"
+sed "s|^ExecStart=.*|ExecStart=$BIN_DIR/gdsyncd|g" packaging/systemd/gdsyncd.service > "$SYSTEMD_USER_DIR/gdsyncd.service"
 
 # 9. Refrescar cachés de KDE / XDG si las utilidades existen
 if command -v kbuildsycoca6 >/dev/null 2>&1; then

@@ -73,6 +73,9 @@ fn main() -> Result<()> {
         let (drive, db, cache, cfg_clone) = (drive.clone(), db.clone(), cache.clone(), cfg.clone());
         let (total_s, used_s) = (total_space.clone(), used_space.clone());
         let upload_notify = upload_notify.clone();
+        let mut sigusr1 = rt.block_on(async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+        })?;
 
         rt.spawn(async move {
             let mut tick = 0u64;
@@ -133,6 +136,9 @@ fn main() -> Result<()> {
 
                 tokio::select! {
                     _ = upload_notify.notified() => {}
+                    _ = sigusr1.recv() => {
+                        info!("comprobación inmediata de cambios remotos solicitada (SIGUSR1)");
+                    }
                     _ = tokio::time::sleep(sleep_duration) => {}
                 }
             }

@@ -94,6 +94,27 @@ pub fn desktop_link(item: &Item) -> String {
     )
 }
 
+/// True for temporary/lock/swap files created by editors and file managers
+/// that should stay local in FUSE and never be uploaded as standalone files.
+pub fn is_temp_file(name: &str) -> bool {
+    name.starts_with(".goutputstream-")
+        || name.starts_with(".~lock.")
+        || name.starts_with(".#")
+        || (name.starts_with('#') && name.ends_with('#') && name.len() > 1)
+        || name.starts_with(".fuse_hidden")
+        || name.starts_with(".Trash-")
+        || name.ends_with('~')
+        || name.ends_with(".swp")
+        || name.ends_with(".swo")
+        || name.ends_with(".swn")
+        || name.ends_with(".swx")
+        || name.ends_with(".kate-swp")
+        || name.ends_with(".part")
+        || name.ends_with(".crdownload")
+        || name.ends_with(".tmp")
+        || matches!(name, ".DS_Store" | "Thumbs.db" | "4913")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +166,20 @@ mod tests {
         let s = desktop_link(&item("XYZ", "Plan", "application/vnd.google-apps.spreadsheet"));
         assert!(s.contains("URL=https://drive.google.com/open?id=XYZ"));
         assert!(s.contains("Icon=x-office-spreadsheet"));
+    }
+
+    #[test]
+    fn detects_editor_temp_files() {
+        assert!(is_temp_file(".goutputstream-ABC123"));
+        assert!(is_temp_file(".~lock.informe.odt#"));
+        assert!(is_temp_file(".nota.txt.swp"));
+        assert!(is_temp_file("nota.txt~"));
+        assert!(is_temp_file("#autosave.txt#"));
+        assert!(is_temp_file(".#lock.txt"));
+        assert!(is_temp_file("descarga.part"));
+        assert!(is_temp_file("4913"));
+        assert!(!is_temp_file("nota.txt"));
+        assert!(!is_temp_file(".gitignore"));
+        assert!(!is_temp_file("informe.odt"));
     }
 }

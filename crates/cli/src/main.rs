@@ -568,6 +568,7 @@ async fn main() -> Result<()> {
             ];
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(parent) = exe.parent() {
+                    candidates.push(parent.join("../share/gdsync/gui/main.py"));
                     candidates.push(parent.join("../../src/gui/main.py"));
                     candidates.push(parent.join("../src/gui/main.py"));
                     candidates.push(parent.join("src/gui/main.py"));
@@ -575,7 +576,6 @@ async fn main() -> Result<()> {
                 }
             }
             candidates.push(PathBuf::from("src/gui/main.py"));
-            candidates.push(PathBuf::from("/home/tiago/Proyectos/Google-Drive-Sincronico/src/gui/main.py"));
 
             let script = candidates.into_iter().find(|p| p.exists());
             if let Some(path) = script {

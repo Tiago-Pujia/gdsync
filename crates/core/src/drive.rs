@@ -431,6 +431,11 @@ impl Drive {
                 .header("Content-Range", "bytes */0")
                 .send()
                 .await?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                bail!("error en subida resumible de archivo vacío ({status}): {body}");
+            }
             return Ok(resp.json().await?);
         }
 

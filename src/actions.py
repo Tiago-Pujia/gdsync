@@ -140,9 +140,9 @@ def get_root_pinned_items(conn):
                 "mime": mime,
                 "is_folder": True,
                 "full_path": full_path,
-                "file_count": file_count,
-                "total_size": total_size,
-                "cached_count": cached_count,
+                "file_count": file_count or 0,
+                "total_size": total_size or 0,
+                "cached_count": cached_count or 0,
             })
         else:
             cur.execute("SELECT 1 FROM cache WHERE id=?", (fid,))

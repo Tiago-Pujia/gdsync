@@ -16,7 +16,7 @@ systemctl --user stop gdsyncd 2>/dev/null || true
 systemctl --user disable gdsyncd 2>/dev/null || true
 
 # Eliminar binarios y accesos
-rm -f "$BIN_DIR/gdsync" "$BIN_DIR/gdsyncd" "$BIN_DIR/gdsync-gui"
+rm -f "$BIN_DIR/gdsync" "$BIN_DIR/gdsync-bin" "$BIN_DIR/gdsyncd" "$BIN_DIR/gdsync-gui"
 rm -f "$APPLICATIONS_DIR/gdsync.desktop"
 rm -f "$SERVICEMENUS_DIR/gdsync.desktop"
 rm -f "$SYSTEMD_USER_DIR/gdsyncd.service"

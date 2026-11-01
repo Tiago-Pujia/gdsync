@@ -35,6 +35,9 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from actions import get_root_pinned_items
+
 # ---- RUTAS ESTÁNDAR ----
 def config_dir():
     return Path.home() / ".config" / "gdsync"
@@ -290,85 +293,6 @@ class FolderLoaderWorker(QThread):
             self.finished_signal.emit(True, out)
         except Exception as e:
             self.finished_signal.emit(False, str(e))
-
-
-def get_root_pinned_items(conn):
-    query = """
-    WITH RECURSIVE
-    path_builder(id, name, parent_id, mime, size, full_path) AS (
-        SELECT id, name, parent_id, mime, size, name as full_path
-        FROM items
-        WHERE parent_id = (SELECT id FROM items WHERE ino=1)
-        UNION ALL
-        SELECT i.id, i.name, i.parent_id, i.mime, i.size, pb.full_path || '/' || i.name
-        FROM items i JOIN path_builder pb ON i.parent_id = pb.id
-    ),
-    ancestors(item_id, ancestor_id, ancestor_pinned) AS (
-        SELECT i.id, i.parent_id, p.pinned
-        FROM items i
-        JOIN items p ON i.parent_id = p.id
-        UNION ALL
-        SELECT a.item_id, p.parent_id, p.pinned
-        FROM ancestors a
-        JOIN items p ON a.ancestor_id = p.id
-        WHERE p.parent_id IS NOT NULL
-    )
-    SELECT pb.id, pb.name, pb.mime, pb.size, pb.full_path
-    FROM path_builder pb
-    JOIN items i ON pb.id = i.id
-    WHERE i.pinned = 1
-      AND NOT EXISTS (
-          SELECT 1 FROM ancestors a
-          WHERE a.item_id = pb.id AND a.ancestor_pinned = 1
-      )
-    ORDER BY (pb.mime = 'application/vnd.google-apps.folder') DESC, pb.full_path ASC;
-    """
-    cur = conn.cursor()
-    cur.execute(query)
-    rows = cur.fetchall()
-
-    results = []
-    FOLDER_MIME = "application/vnd.google-apps.folder"
-    for fid, name, mime, size, full_path in rows:
-        is_folder = (mime == FOLDER_MIME)
-        if is_folder:
-            cur.execute("""
-                WITH RECURSIVE sub(id, size, mime) AS (
-                    SELECT id, size, mime FROM items WHERE id = ?
-                    UNION ALL
-                    SELECT i.id, i.size, i.mime FROM items i JOIN sub s ON i.parent_id = s.id
-                )
-                SELECT 
-                    COUNT(CASE WHEN mime != 'application/vnd.google-apps.folder' AND mime NOT LIKE 'application/vnd.google-apps.%' THEN 1 END),
-                    COALESCE(SUM(CASE WHEN mime != 'application/vnd.google-apps.folder' AND mime NOT LIKE 'application/vnd.google-apps.%' THEN size END), 0),
-                    COUNT(CASE WHEN id IN (SELECT id FROM cache) AND mime != 'application/vnd.google-apps.folder' THEN 1 END)
-                FROM sub;
-            """, (fid,))
-            file_count, total_size, cached_count = cur.fetchone()
-            results.append({
-                "id": fid,
-                "name": name,
-                "mime": mime,
-                "is_folder": True,
-                "full_path": full_path,
-                "file_count": file_count or 0,
-                "total_size": total_size or 0,
-                "cached_count": cached_count or 0,
-            })
-        else:
-            cur.execute("SELECT 1 FROM cache WHERE id=?", (fid,))
-            is_cached = cur.fetchone() is not None
-            results.append({
-                "id": fid,
-                "name": name,
-                "mime": mime,
-                "is_folder": False,
-                "full_path": full_path,
-                "file_count": 1,
-                "total_size": size or 0,
-                "cached_count": 1 if is_cached else 0,
-            })
-    return results
 
 
 class PinnedItemsDialog(QDialog):
@@ -2044,13 +1968,17 @@ class GdsyncWindow(QMainWindow):
         subprocess.Popen(["xdg-open", "https://drive.google.com"])
 
     def trigger_poll_now(self):
-        QMessageBox.information(
-            self,
-            "Sondeo",
-            "El daemon comprueba automáticamente cambios cada "
-            f"{self.cfg.get('poll_interval_secs', 30)} segundos. Refrescando datos locales..."
-        )
-        self.refresh_all()
+        if is_daemon_running():
+            subprocess.call(["pkill", "-USR1", "-x", "gdsyncd"])
+            self.notify("gdsync", "Comprobando cambios remotos en Google Drive...")
+            QTimer.singleShot(1500, self.refresh_all)
+        else:
+            QMessageBox.warning(
+                self,
+                "Servicio detenido",
+                "El servicio gdsyncd no está en ejecución. Inicialo primero para comprobar cambios remotos."
+            )
+            self.refresh_all()
 
 
 def main():

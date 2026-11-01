@@ -4,10 +4,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=%h/.cargo/bin/gdsyncd
+ExecStart=%h/.local/bin/gdsyncd
 Restart=on-failure
 RestartSec=10
-ExecStopPost=-/usr/bin/fusermount -u %h/GoogleDrive
+ExecStopPost=-/bin/sh -c 'M=$(sed -n "s/.*\"mount_point\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "${XDG_CONFIG_HOME:-$HOME/.config}/gdsync/config.json" 2>/dev/null); fusermount3 -uz "${M:-$HOME/GoogleDrive}" 2>/dev/null || true'
 
 [Install]
 WantedBy=default.target

@@ -7,7 +7,7 @@ use fuser::{
 use gdsync_core::cache::Cache;
 use gdsync_core::db::{Db, Item, ROOT_INO};
 use gdsync_core::drive::FOLDER_MIME;
-use gdsync_core::names::{desktop_link, local_entries};
+use gdsync_core::names::{desktop_link, is_temp_file, local_entries};
 use libc::{EACCES, EBADF, EEXIST, EIO, EISDIR, ENODATA, ENOENT, ENOTDIR, ENOTEMPTY, ERANGE};
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -209,7 +209,9 @@ impl Filesystem for DriveFs {
                 let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_len(new_size));
             }
             let _ = self.db.update_item_size_mtime(&item.id, new_size, gdsync_core::now());
-            self.enqueue(&item.id, "update", None);
+            if !is_temp_file(&item.name) {
+                self.enqueue(&item.id, "update", None);
+            }
         }
         let updated = self.item(ino).unwrap_or(item);
         reply.attr(&TTL, &self.attr(&updated));
@@ -324,7 +326,11 @@ impl Filesystem for DriveFs {
         };
         let Some(created_item) = self.item(ino) else { return reply.error(EIO) };
         let _ = self.db.cache_put(&local_id, &created_item.version(), 0);
-        self.enqueue(&local_id, "create", None);
+        if !is_temp_file(&name_str) {
+            self.enqueue(&local_id, "create", None);
+        } else {
+            debug!("archivo temporal local ignorado para subida: {name_str}");
+        }
 
         let fh = self.new_handle(OpenFile::DiskRw { file, item_id: local_id.clone(), dirty: true });
         reply.created(&TTL, &self.attr(&created_item), 0, fh, 0);
@@ -344,7 +350,9 @@ impl Filesystem for DriveFs {
             Ok(i) => i,
             Err(_) => return reply.error(EIO),
         };
-        self.enqueue(&local_id, "mkdir", None);
+        if !is_temp_file(&name_str) {
+            self.enqueue(&local_id, "mkdir", None);
+        }
 
         let Some(created_item) = self.item(ino) else { return reply.error(EIO) };
         reply.entry(&TTL, &self.attr(&created_item), 0);
@@ -408,11 +416,14 @@ impl Filesystem for DriveFs {
         }
     }
 
-    fn flush(&mut self, _req: &Request<'_>, _ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+    fn flush(&mut self, _req: &Request<'_>, ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        let is_temp = self.item(ino).map(|i| is_temp_file(&i.name)).unwrap_or(false);
         let mut handles = self.handles.lock().unwrap();
         if let Some(OpenFile::DiskRw { item_id, dirty, .. }) = handles.get_mut(&fh) {
             if *dirty {
-                self.enqueue(item_id, "update", None);
+                if !is_temp {
+                    self.enqueue(item_id, "update", None);
+                }
                 *dirty = false;
             }
         }
@@ -422,16 +433,17 @@ impl Filesystem for DriveFs {
     fn release(
         &mut self,
         _req: &Request<'_>,
-        _ino: u64,
+        ino: u64,
         fh: u64,
         _flags: i32,
         _lock_owner: Option<u64>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        let is_temp = self.item(ino).map(|i| is_temp_file(&i.name)).unwrap_or(false);
         let mut handles = self.handles.lock().unwrap();
         if let Some(OpenFile::DiskRw { item_id, dirty, .. }) = handles.remove(&fh) {
-            if dirty {
+            if dirty && !is_temp {
                 self.enqueue(&item_id, "update", None);
             }
         }
@@ -555,7 +567,9 @@ impl Filesystem for DriveFs {
                 let _ = std::fs::rename(self.cache.path(&item.id), self.cache.path(&existing.id));
                 let _ = self.db.cache_put(&existing.id, &format!("mtime:{now}"), file_size);
                 let _ = self.db.cancel_uploads(&item.id);
-                self.enqueue(&existing.id, "update", None);
+                if !is_temp_file(&newname_str) {
+                    self.enqueue(&existing.id, "update", None);
+                }
                 return reply.ok();
             }
 
@@ -574,8 +588,15 @@ impl Filesystem for DriveFs {
             return reply.error(EIO);
         }
 
-        if !item.id.starts_with("local_") {
-            if item.name != newname_str {
+        if item.id.starts_with("local_") {
+            if is_temp_file(&newname_str) {
+                let _ = self.db.cancel_uploads(&item.id);
+            } else {
+                let op = if item.is_dir() { "mkdir" } else { "create" };
+                self.enqueue(&item.id, op, None);
+            }
+        } else {
+            if item.name != newname_str && !is_temp_file(&newname_str) {
                 let payload = serde_json::json!({ "name": newname_str }).to_string();
                 self.enqueue(&item.id, "rename", Some(&payload));
             }
