@@ -43,23 +43,79 @@ def notify(title, message, icon="folder-gdrive"):
     except Exception:
         pass
 
+def clean_path(p):
+    s = str(p).strip()
+    if s.startswith("file://"):
+        import urllib.parse
+        s = urllib.parse.unquote(urllib.parse.urlsplit(s).path)
+    return Path(s).resolve()
+
+DOC_EXTENSIONS = (
+    ".gdoc.desktop",
+    ".gsheet.desktop",
+    ".gslides.desktop",
+    ".gdraw.desktop",
+    ".gform.desktop",
+    ".gjam.desktop",
+    ".gmap.desktop",
+    ".gsite.desktop",
+    ".glink.desktop",
+    ".desktop",
+)
+
 def resolve_item(conn, rel_path):
     c = conn.cursor()
     c.execute("SELECT id, ino, name, mime, pinned, web_link FROM items WHERE ino=1")
     root = c.fetchone()
     if not root:
         return None
-    if not rel_path or rel_path == ".":
+    if not rel_path or rel_path in (".", ""):
         return root
     curr_id = root[0]
     curr_item = root
     parts = Path(rel_path).parts
     for seg in parts:
+        # 1. Búsqueda exacta
         c.execute(
             "SELECT id, ino, name, mime, pinned, web_link FROM items WHERE parent_id=? AND name=?",
             (curr_id, seg),
         )
         row = c.fetchone()
+
+        # 2. Búsqueda quitando extensiones de Google Docs (.gdoc.desktop, etc.)
+        if not row:
+            for ext in DOC_EXTENSIONS:
+                if seg.endswith(ext):
+                    stripped = seg[:-len(ext)]
+                    c.execute(
+                        "SELECT id, ino, name, mime, pinned, web_link FROM items WHERE parent_id=? AND name=?",
+                        (curr_id, stripped),
+                    )
+                    row = c.fetchone()
+                    if row:
+                        break
+
+        # 3. Conversión de caracteres sanitizados (/ <-> ∕)
+        if not row:
+            slash_converted = seg.replace("∕", "/")
+            c.execute(
+                "SELECT id, ino, name, mime, pinned, web_link FROM items WHERE parent_id=? AND name=?",
+                (curr_id, slash_converted),
+            )
+            row = c.fetchone()
+
+        # 4. Cotejo con hijos saneados
+        if not row:
+            c.execute(
+                "SELECT id, ino, name, mime, pinned, web_link FROM items WHERE parent_id=?",
+                (curr_id,),
+            )
+            for ch in c.fetchall():
+                ch_sanitized = ch[2].replace("/", "∕")
+                if ch_sanitized == seg or f"{ch_sanitized}.desktop" == seg:
+                    row = ch
+                    break
+
         if not row:
             return None
         curr_id = row[0]
@@ -67,7 +123,25 @@ def resolve_item(conn, rel_path):
     return curr_item
 
 def copy_to_clipboard(text):
-    for cmd in [["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]:
+    # 1. Klipper nativo de KDE Plasma vía DBus (funciona tanto en Wayland como en X11 sin paquetes extra)
+    for cmd in [
+        ["qdbus6", "org.kde.klipper", "/klipper", "setClipboardContents", text],
+        ["qdbus", "org.kde.klipper", "/klipper", "setClipboardContents", text],
+        ["gdbus", "call", "--session", "--dest", "org.kde.klipper", "--object-path", "/klipper", "--method", "org.kde.klipper.klipper.setClipboardContents", text],
+    ]:
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+    # 2. Herramientas CLI comunes (wl-copy en Wayland, xclip / xsel en X11)
+    for cmd in [
+        ["wl-copy"],
+        ["xclip", "-selection", "clipboard"],
+        ["xsel", "--clipboard", "--input"],
+    ]:
         try:
             p = subprocess.Popen(cmd, stdin=subprocess.PIPE)
             p.communicate(input=text.encode("utf-8"))
@@ -75,6 +149,18 @@ def copy_to_clipboard(text):
                 return True
         except Exception:
             continue
+
+    # 3. Fallback con PyQt6 (usado por la interfaz gráfica de gdsync)
+    try:
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(["gdsync"])
+        clipboard = app.clipboard()
+        clipboard.setText(text)
+        app.processEvents()
+        return True
+    except Exception:
+        pass
+
     return False
 
 def get_root_pinned_items(conn):
@@ -220,7 +306,7 @@ def action_pin(mount_point, db_path, target_paths):
     cur = conn.cursor()
 
     for p in target_paths:
-        path_obj = Path(p).resolve()
+        path_obj = clean_path(p)
         try:
             rel = path_obj.relative_to(mount_point)
             rel_str = str(rel)
@@ -309,7 +395,7 @@ def action_unpin(mount_point, db_path, target_paths):
     cur = conn.cursor()
 
     for p in target_paths:
-        path_obj = Path(p).resolve()
+        path_obj = clean_path(p)
         try:
             rel = path_obj.relative_to(mount_point)
             rel_str = str(rel)
@@ -344,44 +430,91 @@ def action_unpin(mount_point, db_path, target_paths):
     return 0
 
 def action_copy_link(mount_point, db_path, target_paths):
-    if not db_path.exists():
-        return 1
-    conn = sqlite3.connect(db_path)
     for p in target_paths:
-        path_obj = Path(p).resolve()
+        path_obj = clean_path(p)
         try:
             rel_str = str(path_obj.relative_to(mount_point))
         except ValueError:
             rel_str = str(path_obj)
 
-        item = resolve_item(conn, rel_str)
-        if item:
-            fid, _, _, _, _, web_link = item
-            url = web_link or f"https://drive.google.com/open?id={fid}"
-            copy_to_clipboard(url)
+        url = None
+        name = path_obj.name
+
+        if db_path.exists():
+            conn = sqlite3.connect(db_path)
+            item = resolve_item(conn, rel_str)
+            if item:
+                fid, _, name_db, _, _, web_link = item
+                name = name_db
+                url = web_link or f"https://drive.google.com/open?id={fid}"
+            conn.close()
+
+        # Fallback a gdsync-bin si la consulta directa no lo encontró
+        if not url:
+            try:
+                res = subprocess.run(
+                    ["gdsync-bin", "copy-link", str(path_obj)],
+                    capture_output=True,
+                    text=True,
+                )
+                if res.returncode == 0:
+                    for line in res.stdout.splitlines():
+                        line_s = line.strip()
+                        if line_s.startswith("http://") or line_s.startswith("https://"):
+                            url = line_s
+                            break
+            except Exception:
+                pass
+
+        if url:
+            copied = copy_to_clipboard(url)
             print(url)
-            notify("Google Drive", f"Enlace copiado al portapapeles:\n{path_obj.name}", "edit-copy")
-    conn.close()
+            if copied:
+                notify("Google Drive", f"Enlace copiado al portapapeles:\n{name}", "edit-copy")
+            else:
+                notify("Google Drive", f"No se pudo copiar al portapapeles:\n{url}", "dialog-warning")
+        else:
+            notify("Google Drive", f"No se encontró el elemento en Google Drive:\n{name}", "dialog-error")
     return 0
 
 def action_open_web(mount_point, db_path, target_paths):
-    if not db_path.exists():
-        return 1
-    conn = sqlite3.connect(db_path)
     for p in target_paths:
-        path_obj = Path(p).resolve()
+        path_obj = clean_path(p)
         try:
             rel_str = str(path_obj.relative_to(mount_point))
         except ValueError:
             rel_str = str(path_obj)
 
-        item = resolve_item(conn, rel_str)
-        if item:
-            fid, _, _, _, _, web_link = item
-            url = web_link or f"https://drive.google.com/open?id={fid}"
+        url = None
+        if db_path.exists():
+            conn = sqlite3.connect(db_path)
+            item = resolve_item(conn, rel_str)
+            if item:
+                fid, _, _, _, _, web_link = item
+                url = web_link or f"https://drive.google.com/open?id={fid}"
+            conn.close()
+
+        if not url:
+            try:
+                res = subprocess.run(
+                    ["gdsync-bin", "copy-link", str(path_obj)],
+                    capture_output=True,
+                    text=True,
+                )
+                if res.returncode == 0:
+                    for line in res.stdout.splitlines():
+                        line_s = line.strip()
+                        if line_s.startswith("http://") or line_s.startswith("https://"):
+                            url = line_s
+                            break
+            except Exception:
+                pass
+
+        if url:
             print(f"Abriendo {url}...")
             subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    conn.close()
+        else:
+            notify("Google Drive", f"No se encontró el elemento:\n{path_obj.name}", "dialog-error")
     return 0
 
 def main():

@@ -549,14 +549,10 @@ async fn main() -> Result<()> {
             let item = resolve_item_from_input_path(&cfg, &db, &path)?;
             let url = item.web_link.unwrap_or_else(|| format!("https://drive.google.com/open?id={}", item.id));
             println!("{url}");
-            if let Ok(mut child) = std::process::Command::new("wl-copy").stdin(std::process::Stdio::piped()).spawn() {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(url.as_bytes());
-                }
-            } else if let Ok(mut child) = std::process::Command::new("xclip").arg("-selection").arg("clipboard").stdin(std::process::Stdio::piped()).spawn() {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(url.as_bytes());
-                }
+            if copy_to_clipboard(&url) {
+                notify_desktop("Google Drive", &format!("Enlace copiado al portapapeles:\n{}", item.name), "edit-copy");
+            } else {
+                notify_desktop("Google Drive", &format!("No se pudo copiar al portapapeles:\n{url}"), "dialog-warning");
             }
         }
 
@@ -691,16 +687,111 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn resolve_item_from_input_path(cfg: &Config, db: &Db, path: &Path) -> Result<Item> {
+fn decode_percent(s: &str) -> String {
+    let mut bytes = Vec::new();
+    let mut chars = s.bytes();
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            if let (Some(h1), Some(h2)) = (chars.next(), chars.next()) {
+                let hex_str = [h1, h2];
+                if let Ok(hex) = std::str::from_utf8(&hex_str) {
+                    if let Ok(val) = u8::from_str_radix(hex, 16) {
+                        bytes.push(val);
+                        continue;
+                    }
+                }
+            }
+        }
+        bytes.push(b);
+    }
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+fn clean_input_path(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix("file://") {
+        PathBuf::from(decode_percent(stripped))
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn copy_to_clipboard(text: &str) -> bool {
+    // 1. KDE Plasma / Klipper vía DBus (Wayland y X11)
+    for cmd in ["qdbus6", "qdbus"] {
+        if let Ok(status) = std::process::Command::new(cmd)
+            .args(["org.kde.klipper", "/klipper", "setClipboardContents", text])
+            .status()
+        {
+            if status.success() {
+                return true;
+            }
+        }
+    }
+
+    if let Ok(status) = std::process::Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.kde.klipper",
+            "--object-path",
+            "/klipper",
+            "--method",
+            "org.kde.klipper.klipper.setClipboardContents",
+            text,
+        ])
+        .status()
+    {
+        if status.success() {
+            return true;
+        }
+    }
+
+    // 2. Wayland wl-copy
+    if let Ok(mut child) = std::process::Command::new("wl-copy").stdin(std::process::Stdio::piped()).spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+            return true;
+        }
+    }
+
+    // 3. X11 xclip
+    if let Ok(mut child) = std::process::Command::new("xclip").arg("-selection").arg("clipboard").stdin(std::process::Stdio::piped()).spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+            return true;
+        }
+    }
+
+    // 4. X11 xsel
+    if let Ok(mut child) = std::process::Command::new("xsel").args(["--clipboard", "--input"]).stdin(std::process::Stdio::piped()).spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+            return true;
+        }
+    }
+
+    false
+}
+
+fn notify_desktop(title: &str, message: &str, icon: &str) {
+    let _ = std::process::Command::new("notify-send")
+        .args(["-a", "gdsync", "-i", icon, title, message])
+        .spawn();
+}
+
+fn resolve_item_from_input_path(cfg: &Config, db: &Db, raw_path: &Path) -> Result<Item> {
+    let path = clean_input_path(raw_path);
     let rel = if path.is_absolute() {
         if let Ok(r) = path.strip_prefix(&cfg.mount_point) {
             r
         } else {
-            path
+            &path
         }
     } else {
-        path
+        &path
     };
     db.resolve_relative_path(rel)?
-        .with_context(|| format!("no se encontró '{}' en Google Drive local", path.display()))
+        .with_context(|| format!("no se encontró '{}' en Google Drive local", raw_path.display()))
 }
