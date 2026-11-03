@@ -9,3 +9,4 @@ Type=Application
 Categories=Network;FileTransfer;Utility;
 Keywords=google;drive;cloud;sync;storage;
 StartupNotify=true
+StartupWMClass=gdsync

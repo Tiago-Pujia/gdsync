@@ -78,6 +78,7 @@ def set_gui_autostart(enabled: bool):
             "Terminal=false\n"
             "Categories=Network;FileTransfer;Utility;\n"
             "StartupNotify=false\n"
+            "StartupWMClass=gdsync\n"
             "X-GNOME-Autostart-enabled=true\n"
         )
         p.write_text(content, encoding="utf-8")
@@ -176,7 +177,8 @@ def load_config():
         "mount_point": str(Path.home() / "GoogleDrive"),
         "poll_interval_secs": 30,
         "cache_max_gb": 10,
-        "sync_folders": ["root"]
+        "sync_folders": ["root"],
+        "close_to_tray": False
     }
 
 def save_config(cfg):
@@ -959,6 +961,18 @@ class GdsyncWindow(QMainWindow):
         notify_lay.addWidget(lbl_persist_hint)
         layout.addWidget(grp_notify)
 
+        # Comportamiento de la ventana
+        grp_behavior = QGroupBox("Comportamiento de la ventana")
+        behavior_lay = QVBoxLayout(grp_behavior)
+        self.chk_close_to_tray = QCheckBox("Permanecer en la bandeja del sistema al presionar la 'X' (cerrar ventana)")
+        self.chk_close_to_tray.setChecked(self.cfg.get("close_to_tray", False))
+        self.chk_close_to_tray.toggled.connect(self.on_close_to_tray_toggled)
+        behavior_lay.addWidget(self.chk_close_to_tray)
+        lbl_tray_hint = QLabel("  Si está desactivado, al hacer clic en 'X' la aplicación se cerrará por completo liberando toda la memoria RAM.")
+        lbl_tray_hint.setStyleSheet("color: gray; font-size: 11px;")
+        behavior_lay.addWidget(lbl_tray_hint)
+        layout.addWidget(grp_behavior)
+
         btn_save = QPushButton("Guardar configuración")
         btn_save.clicked.connect(self.save_settings)
         layout.addWidget(btn_save)
@@ -1009,6 +1023,7 @@ class GdsyncWindow(QMainWindow):
     # ---- BANDEJA DEL SISTEMA (TRAY) ----
     def init_tray(self):
         self.tray = QSystemTrayIcon(self)
+        self.tray.setObjectName("gdsync")
         self.tray.setIcon(load_app_icon())
         self.tray.setToolTip("gdsync - Google Drive")
 
@@ -1164,13 +1179,30 @@ class GdsyncWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+        self.refresh_all()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        # Ralentizar sondeo a 30 segundos mientras la ventana esté oculta
+        if hasattr(self, "timer") and self.timer.isActive():
+            self.timer.setInterval(30000)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Reactivar sondeo a 3 segundos mientras la ventana esté visible
+        if hasattr(self, "timer"):
+            self.timer.setInterval(3000)
+            if not self.timer.isActive():
+                self.timer.start(3000)
 
     def closeEvent(self, event):
-        if self.tray.isVisible():
+        close_to_tray = self.cfg.get("close_to_tray", False)
+        if close_to_tray and hasattr(self, "tray") and self.tray.isVisible():
             self.hide()
             event.ignore()
         else:
             event.accept()
+            QApplication.instance().quit()
 
     # ---- REFRESH GENERAL Y ESTADO ----
     def refresh_all(self):
@@ -1181,6 +1213,37 @@ class GdsyncWindow(QMainWindow):
         self.load_system_logs()
 
     def refresh_status_background(self):
+        # Si la ventana no está visible (está oculta en la bandeja),
+        # evitamos el escaneo intensivo del disco y renderizado de widgets
+        if not self.isVisible():
+            dbp = db_path()
+            if dbp.exists():
+                try:
+                    conn = sqlite3.connect(f"file:{dbp}?mode=ro", uri=True)
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT
+                            COUNT(*),
+                            COALESCE(SUM(CASE WHEN q.op IN ('create', 'update') THEN 1 ELSE 0 END), 0),
+                            (SELECT COALESCE(SUM(i.size), 0)
+                             FROM items i
+                             WHERE i.id IN (SELECT DISTINCT file_id FROM upload_queue WHERE status='pending' AND op IN ('create', 'update'))
+                            ),
+                            COALESCE(SUM(CASE WHEN q.op = 'trash' THEN 1 ELSE 0 END), 0)
+                        FROM upload_queue q
+                        WHERE q.status = 'pending'
+                    """)
+                    summary_row = cur.fetchone()
+                    conn.close()
+                    tot_pending = summary_row[0] if summary_row else 0
+                    uploads_cnt = summary_row[1] if summary_row else 0
+                    upload_bytes = summary_row[2] if summary_row else 0
+                    trash_cnt = summary_row[3] if summary_row else 0
+                    self.update_queue_notification(tot_pending, uploads_cnt, upload_bytes, trash_cnt)
+                except Exception:
+                    pass
+            return
+
         running = is_daemon_running()
         logged = is_logged_in()
 
@@ -1869,6 +1932,10 @@ class GdsyncWindow(QMainWindow):
         else:
             self.refresh_status_background()
 
+    def on_close_to_tray_toggled(self, checked: bool):
+        self.cfg["close_to_tray"] = checked
+        save_config(self.cfg)
+
     def save_settings(self):
         mount = self.txt_mount.text().strip()
         if not mount:
@@ -1879,6 +1946,7 @@ class GdsyncWindow(QMainWindow):
         self.cfg["poll_interval_secs"] = self.spin_poll.value()
         self.cfg["notifications_enabled"] = self.chk_notifications.isChecked()
         self.cfg["persistent_upload_notify"] = self.chk_persistent_notify.isChecked()
+        self.cfg["close_to_tray"] = self.chk_close_to_tray.isChecked()
         save_config(self.cfg)
         set_gui_autostart(self.chk_autostart_gui.isChecked())
         set_daemon_autostart(self.chk_autostart_daemon.isChecked())
@@ -1982,7 +2050,18 @@ class GdsyncWindow(QMainWindow):
 
 
 def main():
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        libc.prctl(15, b"gdsync\0", 0, 0, 0)
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
+    app.setApplicationName("gdsync")
+    app.setApplicationDisplayName("gdsync")
+    app.setDesktopFileName("gdsync")
+    app.setWindowIcon(load_app_icon())
     app.setQuitOnLastWindowClosed(False)
 
     SOCKET_NAME = "gdsync_gui_ipc"
