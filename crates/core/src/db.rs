@@ -29,9 +29,9 @@ impl Item {
     pub fn is_shortcut(&self) -> bool {
         self.mime == SHORTCUT_MIME
     }
-    /// Docs/Sheets/Slides/...: no binary content, shown as a link.
+    /// Docs/Sheets/Slides/... and shortcuts: no binary content, shown as a link.
     pub fn is_google_doc(&self) -> bool {
-        self.mime.starts_with(GOOGLE_APPS_PREFIX) && !self.is_dir() && !self.is_shortcut()
+        self.mime.starts_with(GOOGLE_APPS_PREFIX) && !self.is_dir()
     }
     /// Identifies the remote content version, to know if the cached copy is stale.
     pub fn version(&self) -> String {

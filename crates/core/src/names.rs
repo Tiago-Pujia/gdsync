@@ -13,6 +13,7 @@ fn google_kind(mime: &str) -> (&'static str, &'static str) {
         "jam" => (".gjam", "text-html"),
         "map" => (".gmap", "text-html"),
         "site" => (".gsite", "text-html"),
+        "shortcut" => (".glink", "emblem-symbolic-link"),
         _ => (".glink", "text-html"),
     }
 }
@@ -54,7 +55,6 @@ fn with_suffix(name: &str, n: usize) -> String {
 /// Local entries of a directory. `children` must be ordered by (name, id), as
 /// returned by `Db::children`, so suffixes are stable between calls.
 pub fn local_entries(children: Vec<Item>) -> Vec<(String, Item)> {
-    let children: Vec<Item> = children.into_iter().filter(|i| !i.is_shortcut()).collect();
     let bases: Vec<String> = children.iter().map(base_name).collect();
 
     // First occurrence of each name keeps it; later duplicates get " (n)".
@@ -158,7 +158,7 @@ mod tests {
             item("3", "Informe", "application/vnd.google-apps.document"),
             item("4", "atajo", "application/vnd.google-apps.shortcut"),
         ]);
-        assert_eq!(got, vec!["a∕b", ".._", "Informe.gdoc.desktop"]);
+        assert_eq!(got, vec!["a∕b", ".._", "Informe.gdoc.desktop", "atajo.glink.desktop"]);
     }
 
     #[test]
@@ -166,6 +166,10 @@ mod tests {
         let s = desktop_link(&item("XYZ", "Plan", "application/vnd.google-apps.spreadsheet"));
         assert!(s.contains("URL=https://drive.google.com/open?id=XYZ"));
         assert!(s.contains("Icon=x-office-spreadsheet"));
+
+        let shortcut = desktop_link(&item("SC1", "Mi Atajo", "application/vnd.google-apps.shortcut"));
+        assert!(shortcut.contains("URL=https://drive.google.com/open?id=SC1"));
+        assert!(shortcut.contains("Icon=emblem-symbolic-link"));
     }
 
     #[test]

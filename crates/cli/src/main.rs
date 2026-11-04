@@ -511,7 +511,7 @@ async fn main() -> Result<()> {
             let item = resolve_item_from_input_path(&cfg, &db, &path)?;
             db.set_pinned(&item.id, true)?;
             println!("✓ '{}' marcado como disponible sin conexión.", item.name);
-            if !item.is_dir() {
+            if !item.is_dir() && !item.is_google_doc() {
                 let drive = Arc::new(Drive::new(cfg.clone())?);
                 let db_arc = Arc::new(Db::open(&db_path())?);
                 let cache = Cache::new(
