@@ -15,7 +15,14 @@ pub const SHORTCUT_MIME: &str = "application/vnd.google-apps.shortcut";
 pub const GOOGLE_APPS_PREFIX: &str = "application/vnd.google-apps.";
 
 const API: &str = "https://www.googleapis.com/drive/v3";
-const FILE_FIELDS: &str = "id,name,mimeType,size,md5Checksum,modifiedTime,parents,trashed,webViewLink";
+const FILE_FIELDS: &str = "id,name,mimeType,size,md5Checksum,modifiedTime,parents,trashed,webViewLink,shortcutDetails";
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutDetails {
+    pub target_id: Option<String>,
+    pub target_mime_type: Option<String>,
+}
 
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +40,7 @@ pub struct RemoteFile {
     #[serde(default)]
     pub trashed: bool,
     pub web_view_link: Option<String>,
+    pub shortcut_details: Option<ShortcutDetails>,
 }
 
 #[derive(Deserialize)]

@@ -444,9 +444,12 @@ def action_copy_link(mount_point, db_path, target_paths):
             conn = sqlite3.connect(db_path)
             item = resolve_item(conn, rel_str)
             if item:
-                fid, _, name_db, _, _, web_link = item
+                fid, _, name_db, mime, _, web_link = item
                 name = name_db
-                url = web_link or f"https://drive.google.com/open?id={fid}"
+                if mime == "application/vnd.google-apps.shortcut" and web_link and "/file/d/" in web_link:
+                    url = f"https://drive.google.com/open?id={fid}"
+                else:
+                    url = web_link or f"https://drive.google.com/open?id={fid}"
             conn.close()
 
         # Fallback a gdsync-bin si la consulta directa no lo encontró
@@ -490,8 +493,11 @@ def action_open_web(mount_point, db_path, target_paths):
             conn = sqlite3.connect(db_path)
             item = resolve_item(conn, rel_str)
             if item:
-                fid, _, _, _, _, web_link = item
-                url = web_link or f"https://drive.google.com/open?id={fid}"
+                fid, _, _, mime, _, web_link = item
+                if mime == "application/vnd.google-apps.shortcut" and web_link and "/file/d/" in web_link:
+                    url = f"https://drive.google.com/open?id={fid}"
+                else:
+                    url = web_link or f"https://drive.google.com/open?id={fid}"
             conn.close()
 
         if not url:

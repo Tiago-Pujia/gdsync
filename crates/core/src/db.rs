@@ -157,6 +157,23 @@ impl Db {
         let mtime = f.modified_time.as_deref().and_then(parse_rfc3339).unwrap_or(0);
         // Root is the only item without parent; Drive is single-parent since 2020.
         let parent = if ino == Some(ROOT_INO) { None } else { f.parents.first().cloned() };
+        let web_link = if f.mime_type == SHORTCUT_MIME {
+            if let Some(details) = &f.shortcut_details {
+                if let Some(target_id) = &details.target_id {
+                    if details.target_mime_type.as_deref() == Some(FOLDER_MIME) {
+                        Some(format!("https://drive.google.com/drive/folders/{target_id}"))
+                    } else {
+                        Some(format!("https://drive.google.com/open?id={target_id}"))
+                    }
+                } else {
+                    Some(format!("https://drive.google.com/open?id={}", f.id))
+                }
+            } else {
+                Some(format!("https://drive.google.com/open?id={}", f.id))
+            }
+        } else {
+            f.web_view_link.clone()
+        };
         conn.execute(
             "INSERT INTO items(ino,id,parent_id,name,mime,size,md5,mtime,web_link)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
@@ -164,7 +181,7 @@ impl Db {
                  parent_id=excluded.parent_id, name=excluded.name, mime=excluded.mime,
                  size=excluded.size, md5=excluded.md5, mtime=excluded.mtime,
                  web_link=excluded.web_link",
-            params![ino.map(|i| i as i64), f.id, parent, f.name, f.mime_type, size, f.md5_checksum, mtime, f.web_view_link],
+            params![ino.map(|i| i as i64), f.id, parent, f.name, f.mime_type, size, f.md5_checksum, mtime, web_link],
         )?;
         Ok(())
     }
@@ -557,6 +574,7 @@ mod tests {
             parents: vec![parent.into()],
             trashed: false,
             web_view_link: None,
+            shortcut_details: None,
         }
     }
 
@@ -735,5 +753,41 @@ mod tests {
         assert_eq!(updated.size, 42);
         assert_eq!(updated.mtime, 500);
         assert_eq!(updated.mime, "text/plain");
+    }
+
+    #[test]
+    fn test_shortcut_weblink() {
+        use crate::drive::ShortcutDetails;
+
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_root(&rf("ROOT", "Mi unidad", "", FOLDER_MIME)).unwrap();
+
+        // 1. Folder shortcut
+        let mut folder_sc = rf("SC_FOLDER", "Mi Carpeta Atajo", "ROOT", SHORTCUT_MIME);
+        folder_sc.web_view_link = Some("https://drive.google.com/file/d/SC_FOLDER/view?usp=drivesdk".into());
+        folder_sc.shortcut_details = Some(ShortcutDetails {
+            target_id: Some("TARGET_FOLDER_123".into()),
+            target_mime_type: Some(FOLDER_MIME.into()),
+        });
+        db.upsert(&folder_sc).unwrap();
+        let item = db.by_id("SC_FOLDER").unwrap().unwrap();
+        assert_eq!(
+            item.web_link.as_deref(),
+            Some("https://drive.google.com/drive/folders/TARGET_FOLDER_123")
+        );
+
+        // 2. File shortcut
+        let mut file_sc = rf("SC_FILE", "Mi Archivo Atajo", "ROOT", SHORTCUT_MIME);
+        file_sc.web_view_link = Some("https://drive.google.com/file/d/SC_FILE/view?usp=drivesdk".into());
+        file_sc.shortcut_details = Some(ShortcutDetails {
+            target_id: Some("TARGET_FILE_456".into()),
+            target_mime_type: Some("application/pdf".into()),
+        });
+        db.upsert(&file_sc).unwrap();
+        let item = db.by_id("SC_FILE").unwrap().unwrap();
+        assert_eq!(
+            item.web_link.as_deref(),
+            Some("https://drive.google.com/open?id=TARGET_FILE_456")
+        );
     }
 }

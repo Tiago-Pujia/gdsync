@@ -83,14 +83,26 @@ pub fn local_entries(children: Vec<Item>) -> Vec<(String, Item)> {
 
 /// Content of the `.desktop` link that represents a Google Doc.
 pub fn desktop_link(item: &Item) -> String {
-    let url = item
-        .web_link
-        .clone()
-        .unwrap_or_else(|| format!("https://drive.google.com/open?id={}", item.id));
+    let url = if item.is_shortcut() {
+        match &item.web_link {
+            Some(link) if link.contains("/drive/folders/") => link.clone(),
+            Some(link) if link.contains("/file/d/") => format!("https://drive.google.com/open?id={}", item.id),
+            Some(link) => link.clone(),
+            None => format!("https://drive.google.com/open?id={}", item.id),
+        }
+    } else {
+        item.web_link
+            .clone()
+            .unwrap_or_else(|| format!("https://drive.google.com/open?id={}", item.id))
+    };
     let name = item.name.replace(['\n', '\r'], " ");
-    format!(
-        "[Desktop Entry]\nType=Link\nName={name}\nURL={url}\nIcon={}\n",
+    let icon = if item.is_shortcut() && url.contains("/drive/folders/") {
+        "folder-link"
+    } else {
         google_kind(&item.mime).1
+    };
+    format!(
+        "[Desktop Entry]\nType=Link\nName={name}\nURL={url}\nIcon={icon}\n"
     )
 }
 
@@ -170,6 +182,17 @@ mod tests {
         let shortcut = desktop_link(&item("SC1", "Mi Atajo", "application/vnd.google-apps.shortcut"));
         assert!(shortcut.contains("URL=https://drive.google.com/open?id=SC1"));
         assert!(shortcut.contains("Icon=emblem-symbolic-link"));
+
+        let mut sc_folder = item("SC2", "Carpeta Atajo", "application/vnd.google-apps.shortcut");
+        sc_folder.web_link = Some("https://drive.google.com/drive/folders/TARGET_123".into());
+        let s_folder = desktop_link(&sc_folder);
+        assert!(s_folder.contains("URL=https://drive.google.com/drive/folders/TARGET_123"));
+        assert!(s_folder.contains("Icon=folder-link"));
+
+        let mut sc_broken = item("SC3", "Atajo Roto", "application/vnd.google-apps.shortcut");
+        sc_broken.web_link = Some("https://drive.google.com/file/d/SC3/view?usp=drivesdk".into());
+        let s_broken = desktop_link(&sc_broken);
+        assert!(s_broken.contains("URL=https://drive.google.com/open?id=SC3"));
     }
 
     #[test]
