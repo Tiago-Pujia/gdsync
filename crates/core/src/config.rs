@@ -34,6 +34,9 @@ pub struct Config {
     /// Folders selected for sync (defaults to ["root"] for full drive).
     #[serde(default = "default_sync_folders")]
     pub sync_folders: Vec<String>,
+    /// Auto-retry failed uploads interval in seconds (0 = disabled, default 300 = 5 minutes).
+    #[serde(default = "default_auto_retry_secs")]
+    pub auto_retry_secs: u64,
 }
 
 fn default_mount() -> PathBuf {
@@ -48,6 +51,9 @@ fn default_cache_gb() -> u64 {
 fn default_sync_folders() -> Vec<String> {
     vec!["root".into()]
 }
+fn default_auto_retry_secs() -> u64 {
+    300
+}
 
 impl Config {
     pub fn new(client_id: String, client_secret: String) -> Self {
@@ -58,6 +64,7 @@ impl Config {
             poll_interval_secs: default_poll(),
             cache_max_gb: default_cache_gb(),
             sync_folders: default_sync_folders(),
+            auto_retry_secs: default_auto_retry_secs(),
         }
     }
     pub fn path() -> PathBuf {

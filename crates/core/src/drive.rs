@@ -110,7 +110,25 @@ impl Drive {
     async fn bearer(&self) -> Result<String> {
         let mut t = self.token.lock().await;
         if t.expires_at - 60 < now() {
-            *t = auth::refresh(&self.http, &self.cfg, &t).await?;
+            if let Ok(on_disk) = Token::load() {
+                if on_disk.refresh_token != t.refresh_token || on_disk.expires_at > t.expires_at {
+                    *t = on_disk;
+                }
+            }
+            if t.expires_at - 60 < now() {
+                match auth::refresh(&self.http, &self.cfg, &t).await {
+                    Ok(new_tok) => *t = new_tok,
+                    Err(e) => {
+                        if let Ok(on_disk) = Token::load() {
+                            if on_disk.refresh_token != t.refresh_token && on_disk.expires_at - 60 >= now() {
+                                *t = on_disk;
+                                return Ok(t.access_token.clone());
+                            }
+                        }
+                        return Err(e);
+                    }
+                }
+            }
         }
         Ok(t.access_token.clone())
     }

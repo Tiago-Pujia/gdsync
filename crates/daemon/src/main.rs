@@ -79,10 +79,25 @@ fn main() -> Result<()> {
 
         rt.spawn(async move {
             let mut tick = 0u64;
+            let mut last_auto_retry = std::time::Instant::now();
             loop {
                 // Reload configuration dynamically to detect changes in sync_folders or intervals
                 let active_cfg = Config::load().unwrap_or_else(|_| cfg_clone.clone());
                 let sleep_duration = Duration::from_secs(active_cfg.poll_interval_secs.max(5));
+
+                // 0. Auto-retry failed uploads periodically if enabled
+                if active_cfg.auto_retry_secs > 0 && last_auto_retry.elapsed() >= Duration::from_secs(active_cfg.auto_retry_secs) {
+                    last_auto_retry = std::time::Instant::now();
+                    match db.failed_uploads_count() {
+                        Ok(cnt) if cnt > 0 => {
+                            match db.retry_failed_uploads() {
+                                Ok(n) => info!("reintentando automáticamente {n} tareas fallidas en la cola de sincronización"),
+                                Err(e) => warn!("error al reintentar tareas fallidas automáticamente: {e:#}"),
+                            }
+                        }
+                        _ => {}
+                    }
+                }
 
                 // 1. Process pending local uploads first (drain queue continuously)
                 let mut total_uploaded = 0;

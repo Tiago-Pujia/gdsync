@@ -88,6 +88,8 @@ enum Cmd {
     Logout,
     /// Borra la base de datos local y la caché (ejecutar con el daemon detenido).
     Resync,
+    /// Reintenta las tareas fallidas en la cola de sincronización.
+    Retry,
     /// Administra el inicio automático con el sistema al iniciar sesión.
     Autostart {
         #[command(subcommand)]
@@ -337,7 +339,11 @@ async fn main() -> Result<()> {
                 );
                 let summary = db.pending_uploads_summary().unwrap_or_default();
                 if summary.total == 0 {
-                    println!("Cola de sincronización: 0 tareas pendientes (Todo al día)");
+                    if summary.failed > 0 {
+                        println!("Cola de sincronización: 0 pendientes | ⚠️ {} fallida(s) (ejecutá 'gdsync retry')", summary.failed);
+                    } else {
+                        println!("Cola de sincronización: 0 tareas pendientes (Todo al día)");
+                    }
                 } else {
                     let size_str = if summary.upload_bytes >= 1_000_000_000 {
                         format!("{:.2} GB", summary.upload_bytes as f64 / 1_000_000_000.0)
@@ -369,6 +375,9 @@ async fn main() -> Result<()> {
                             "Cola de sincronización: {} tarea(s) pendiente(s)",
                             summary.total
                         );
+                    }
+                    if summary.failed > 0 {
+                        println!("⚠️  Tareas fallidas:     {} en cola (ejecutá 'gdsync retry' para reintentar)", summary.failed);
                     }
                 }
                 if let (Ok(Some(tot)), Ok(Some(used))) = (db.kv_get("storage_total"), db.kv_get("storage_used")) {
@@ -607,6 +616,23 @@ async fn main() -> Result<()> {
             }
             let _ = std::fs::remove_dir_all(cache_dir().join("blobs"));
             println!("Estado local y caché borrados con éxito.");
+        }
+
+        Cmd::Retry => {
+            if !db_path().exists() {
+                println!("No existe base de datos local de gdsync.");
+                return Ok(());
+            }
+            let db = Db::open(&db_path())?;
+            let count = db.retry_failed_uploads()?;
+            if count == 0 {
+                println!("No hay tareas fallidas en la cola de sincronización.");
+            } else {
+                println!("✓ Se reactivaron {count} tarea(s) fallida(s) para reintentar.");
+                let _ = std::process::Command::new("pkill")
+                    .args(["-USR1", "-x", "gdsyncd"])
+                    .status();
+            }
         }
 
         Cmd::Autostart { sub } => {

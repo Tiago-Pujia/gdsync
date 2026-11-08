@@ -88,6 +88,7 @@ pub struct QueueSummary {
     pub upload_bytes: u64,
     pub trashes: u64,
     pub others: u64,
+    pub failed: u64,
 }
 
 pub struct Db {
@@ -450,20 +451,20 @@ impl Db {
     }
 
     pub fn pending_uploads_summary(&self) -> Result<QueueSummary> {
-        let (total, uploads, bytes, trashes, others): (i64, i64, i64, i64, i64) = self.conn().query_row(
+        let (total, uploads, bytes, trashes, others, failed): (i64, i64, i64, i64, i64, i64) = self.conn().query_row(
             "SELECT
-                COUNT(*),
-                COALESCE(SUM(CASE WHEN q.op IN ('create', 'update') THEN 1 ELSE 0 END), 0),
+                COUNT(CASE WHEN q.status = 'pending' THEN 1 END),
+                COALESCE(SUM(CASE WHEN q.status = 'pending' AND q.op IN ('create', 'update') THEN 1 ELSE 0 END), 0),
                 (SELECT COALESCE(SUM(i.size), 0)
                  FROM items i
                  WHERE i.id IN (SELECT DISTINCT file_id FROM upload_queue WHERE status='pending' AND op IN ('create', 'update'))
                 ),
-                COALESCE(SUM(CASE WHEN q.op = 'trash' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN q.op NOT IN ('create', 'update', 'trash') THEN 1 ELSE 0 END), 0)
-             FROM upload_queue q
-             WHERE q.status = 'pending'",
+                COALESCE(SUM(CASE WHEN q.status = 'pending' AND q.op = 'trash' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN q.status = 'pending' AND q.op NOT IN ('create', 'update', 'trash') THEN 1 ELSE 0 END), 0),
+                COUNT(CASE WHEN q.status = 'failed' THEN 1 END)
+             FROM upload_queue q",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )?;
         Ok(QueueSummary {
             total: total as u64,
@@ -471,7 +472,54 @@ impl Db {
             upload_bytes: bytes as u64,
             trashes: trashes as u64,
             others: others as u64,
+            failed: failed as u64,
         })
+    }
+
+    pub fn failed_uploads_count(&self) -> Result<u64> {
+        Ok(self.conn().query_row(
+            "SELECT COUNT(*) FROM upload_queue WHERE status='failed'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64)
+    }
+
+    pub fn retry_failed_uploads(&self) -> Result<usize> {
+        let n = self.conn().execute(
+            "UPDATE upload_queue SET status='pending', attempts=0, last_error=NULL WHERE status='failed'",
+            [],
+        )?;
+        Ok(n)
+    }
+
+    pub fn retry_upload_ids(&self, ids: &[i64]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn();
+        let mut count = 0;
+        for id in ids {
+            count += conn.execute(
+                "UPDATE upload_queue SET status='pending', attempts=0, last_error=NULL WHERE id=?1",
+                [id],
+            )?;
+        }
+        Ok(count)
+    }
+
+    pub fn discard_upload_ids(&self, ids: &[i64]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn();
+        let mut count = 0;
+        for id in ids {
+            count += conn.execute(
+                "DELETE FROM upload_queue WHERE id=?1",
+                [id],
+            )?;
+        }
+        Ok(count)
     }
 
     // ---- key/value ----
@@ -662,6 +710,17 @@ mod tests {
 
         db.cancel_pending_updates("file_2").unwrap();
         assert_eq!(db.pending_uploads_count().unwrap(), 0);
+
+        // Test retry of failed tasks
+        let id3 = db.enqueue_upload("file_3", "create", None).unwrap();
+        db.update_upload_status(id3, "failed", Some("network error")).unwrap();
+        assert_eq!(db.failed_uploads_count().unwrap(), 1);
+        let summary_failed = db.pending_uploads_summary().unwrap();
+        assert_eq!(summary_failed.failed, 1);
+        let retried = db.retry_failed_uploads().unwrap();
+        assert_eq!(retried, 1);
+        assert_eq!(db.failed_uploads_count().unwrap(), 0);
+        assert_eq!(db.pending_uploads_count().unwrap(), 1);
     }
 
     #[test]

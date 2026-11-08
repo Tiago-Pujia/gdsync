@@ -5,7 +5,7 @@ Construida con PyQt6 para integrarse de forma 100% nativa con KDE y el sistema.
 Aprovecha al máximo todos los comandos de la CLI de gdsync:
 - Monitor de estado y cuotas en tiempo real
 - Explorador interactivo de Drive con resolución exacta de rutas (pin, unpin, open-web, copy-link)
-- Cola de subidas y sincronización en vivo
+- Cola de sincronización y estado en vivo
 - Selección selectiva de carpetas (con carga asíncrona sin bloqueos)
 - Asistente de cuenta: Importación de JSON de Google Cloud (client_secret_*.json) y login OAuth
 - Ajustes de montaje, caché, sondeo y resync seguro
@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QLabel, QPushButton, QProgressBar, QTreeWidget,
     QTreeWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView,
     QFileDialog, QSpinBox, QLineEdit, QMessageBox, QSystemTrayIcon,
-    QMenu, QGroupBox, QStyle, QTextEdit, QComboBox, QSplitter,
+    QMenu, QGroupBox, QStyle, QTextEdit, QTextBrowser, QComboBox, QSplitter,
     QDialog, QDialogButtonBox, QAbstractItemView, QCheckBox
 )
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
@@ -631,7 +631,7 @@ class GdsyncWindow(QMainWindow):
         grp_sync = QGroupBox("Detalles de sincronización")
         sync_lay = QVBoxLayout(grp_sync)
         self.lbl_items_count = QLabel("Elementos registrados en base de datos: -")
-        self.lbl_upload_queue = QLabel("Tareas pendientes de subida: 0")
+        self.lbl_upload_queue = QLabel("Tareas pendientes de sincronización: 0")
         self.lbl_pinned_count = QLabel("Archivos disponibles sin conexión (anclados): 0")
         self.lbl_sync_mode = QLabel("Modo de sincronización: -")
 
@@ -736,7 +736,7 @@ class GdsyncWindow(QMainWindow):
 
         self.tabs.addTab(w, "📁 Explorador de Drive")
 
-    # ---- PESTAÑA 3: COLA DE SUBIDAS ----
+    # ---- PESTAÑA 3: COLA DE SINCRONIZACIÓN ----
     def init_tab_queue(self):
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -750,12 +750,20 @@ class GdsyncWindow(QMainWindow):
         self.table_queue.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table_queue.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_queue.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table_queue.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_queue.customContextMenuRequested.connect(self.show_queue_context_menu)
+        self.table_queue.itemDoubleClicked.connect(self.on_queue_item_double_clicked)
         layout.addWidget(self.table_queue)
 
         bar = QHBoxLayout()
-        self.lbl_queue_status = QLabel("Cola de subidas: 0 tareas.")
+        self.lbl_queue_status = QLabel("Cola de sincronización: 0 tareas.")
         bar.addWidget(self.lbl_queue_status)
         bar.addStretch()
+
+        self.btn_retry_failed = QPushButton("🔄 Reintentar fallidas")
+        self.btn_retry_failed.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        self.btn_retry_failed.clicked.connect(self.retry_failed_uploads_clicked)
+        bar.addWidget(self.btn_retry_failed)
 
         btn_refresh_q = QPushButton("Actualizar cola")
         btn_refresh_q.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
@@ -763,7 +771,7 @@ class GdsyncWindow(QMainWindow):
         bar.addWidget(btn_refresh_q)
         layout.addLayout(bar)
 
-        self.tabs.addTab(w, "📤 Cola de Subidas")
+        self.tabs.addTab(w, "📤 Cola de Sincronización")
 
     # ---- PESTAÑA 4: SINCRONIZACIÓN SELECTIVA ----
     def init_tab_selective(self):
@@ -799,6 +807,22 @@ class GdsyncWindow(QMainWindow):
     def init_tab_account(self):
         w = QWidget()
         layout = QVBoxLayout(w)
+
+        grp_tutorial = QGroupBox("Guía y tutorial de Google Cloud")
+        tut_lay = QVBoxLayout(grp_tutorial)
+        lbl_tut_info = QLabel(
+            "¿Necesitás crear tus credenciales de Google Drive o evitar que tu sesión venza cada 7 días? "
+            "Consultá la guía interactiva paso a paso:"
+        )
+        lbl_tut_info.setWordWrap(True)
+        tut_lay.addWidget(lbl_tut_info)
+
+        self.btn_tutorial = QPushButton("📘 Ver Tutorial Paso a Paso de Google Cloud Console")
+        self.btn_tutorial.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation))
+        self.btn_tutorial.setStyleSheet("font-weight: bold; padding: 8px; font-size: 13px;")
+        self.btn_tutorial.clicked.connect(self.show_google_cloud_tutorial)
+        tut_lay.addWidget(self.btn_tutorial)
+        layout.addWidget(grp_tutorial)
 
         grp_import = QGroupBox("Importar credenciales de Google Cloud")
         imp_lay = QVBoxLayout(grp_import)
@@ -914,6 +938,18 @@ class GdsyncWindow(QMainWindow):
         self.spin_poll.setValue(self.cfg.get("poll_interval_secs", 30))
         h2.addWidget(self.spin_poll)
         opts_lay.addLayout(h2)
+
+        h3 = QHBoxLayout()
+        h3.addWidget(QLabel("Reintento automático de tareas fallidas (minutos, 0 = desactivado):"))
+        self.spin_auto_retry = QSpinBox()
+        self.spin_auto_retry.setRange(0, 1440)
+        self.spin_auto_retry.setValue(self.cfg.get("auto_retry_secs", 300) // 60)
+        h3.addWidget(self.spin_auto_retry)
+        opts_lay.addLayout(h3)
+
+        lbl_retry_hint = QLabel("  Reintenta periódicamente en segundo plano las subidas que hayan fallado por errores temporales de red o credenciales.")
+        lbl_retry_hint.setStyleSheet("color: gray; font-size: 11px;")
+        opts_lay.addWidget(lbl_retry_hint)
 
         layout.addWidget(grp_opts)
 
@@ -1306,38 +1342,43 @@ class GdsyncWindow(QMainWindow):
 
                 cur.execute("""
                     SELECT
-                        COUNT(*),
-                        COALESCE(SUM(CASE WHEN q.op IN ('create', 'update') THEN 1 ELSE 0 END), 0),
+                        COUNT(CASE WHEN q.status = 'pending' THEN 1 END),
+                        COALESCE(SUM(CASE WHEN q.status = 'pending' AND q.op IN ('create', 'update') THEN 1 ELSE 0 END), 0),
                         (SELECT COALESCE(SUM(i.size), 0)
                          FROM items i
                          WHERE i.id IN (SELECT DISTINCT file_id FROM upload_queue WHERE status='pending' AND op IN ('create', 'update'))
                         ),
-                        COALESCE(SUM(CASE WHEN q.op = 'trash' THEN 1 ELSE 0 END), 0)
+                        COALESCE(SUM(CASE WHEN q.status = 'pending' AND q.op = 'trash' THEN 1 ELSE 0 END), 0),
+                        COUNT(CASE WHEN q.status = 'failed' THEN 1 END)
                     FROM upload_queue q
-                    WHERE q.status = 'pending'
                 """)
                 summary_row = cur.fetchone()
                 tot_pending = summary_row[0] if summary_row else 0
                 uploads_cnt = summary_row[1] if summary_row else 0
                 upload_bytes = summary_row[2] if summary_row else 0
                 trash_cnt = summary_row[3] if summary_row else 0
+                failed_cnt = summary_row[4] if summary_row else 0
 
-                if tot_pending == 0:
+                failed_label = f" | <span style='color: #e53935; font-weight: bold;'>⚠️ {failed_cnt} fallida(s)</span>" if failed_cnt > 0 else ""
+
+                if tot_pending == 0 and failed_cnt == 0:
                     self.lbl_upload_queue.setText("Tareas pendientes de sincronización: <b>0</b> (Todo al día)")
+                elif tot_pending == 0:
+                    self.lbl_upload_queue.setText(f"Tareas pendientes: <b>0</b>{failed_label}")
                 elif uploads_cnt > 0 and trash_cnt > 0:
                     self.lbl_upload_queue.setText(
-                        f"Tareas pendientes: <b>{tot_pending}</b> ({uploads_cnt} por subir: <b>{format_bytes(upload_bytes)}</b> | {trash_cnt} en papelera)"
+                        f"Tareas pendientes: <b>{tot_pending}</b> ({uploads_cnt} por subir: <b>{format_bytes(upload_bytes)}</b> | {trash_cnt} en papelera){failed_label}"
                     )
                 elif uploads_cnt > 0:
                     self.lbl_upload_queue.setText(
-                        f"Tareas pendientes de subida: <b>{uploads_cnt}</b> (<b>{format_bytes(upload_bytes)}</b> por subir)"
+                        f"Tareas pendientes de sincronización: <b>{uploads_cnt}</b> (<b>{format_bytes(upload_bytes)}</b> por subir){failed_label}"
                     )
                 elif trash_cnt > 0:
                     self.lbl_upload_queue.setText(
-                        f"Tareas pendientes: <b>{tot_pending}</b> ({trash_cnt} enviándose a la papelera | 0 B por subir)"
+                        f"Tareas pendientes: <b>{tot_pending}</b> ({trash_cnt} enviándose a la papelera | 0 B por subir){failed_label}"
                     )
                 else:
-                    self.lbl_upload_queue.setText(f"Tareas pendientes: <b>{tot_pending}</b>")
+                    self.lbl_upload_queue.setText(f"Tareas pendientes: <b>{tot_pending}</b>{failed_label}")
 
                 self.update_queue_notification(tot_pending, uploads_cnt, upload_bytes, trash_cnt)
 
@@ -1643,49 +1684,52 @@ class GdsyncWindow(QMainWindow):
         if info:
             self.open_local_by_path(info["rel_path"], info["is_folder"])
 
-    # ---- PESTAÑA COLA DE SUBIDAS ----
+    # ---- PESTAÑA COLA DE SINCRONIZACIÓN ----
     def load_queue_from_db(self):
         dbp = db_path()
         if not dbp.exists():
             self.table_queue.setRowCount(0)
             self.lbl_queue_status.setText("Base de datos no inicializada.")
+            if hasattr(self, "btn_retry_failed"):
+                self.btn_retry_failed.setEnabled(False)
             return
 
         try:
             conn = sqlite3.connect(f"file:{dbp}?mode=ro", uri=True)
             cur = conn.cursor()
             cur.execute("""
-                SELECT q.id, q.op, q.file_id, i.name, q.payload, i.size, q.status, q.attempts, q.created_at
+                SELECT q.id, q.op, q.file_id, i.name, q.payload, i.size, q.status, q.attempts, q.created_at, q.last_error
                 FROM upload_queue q
                 LEFT JOIN items i ON q.file_id = i.id
-                ORDER BY q.id DESC LIMIT 50
+                ORDER BY q.id DESC LIMIT 100
             """)
             rows = cur.fetchall()
 
             cur.execute("""
                 SELECT
-                    COUNT(*),
-                    COALESCE(SUM(CASE WHEN q.op IN ('create', 'update') THEN 1 ELSE 0 END), 0),
+                    COUNT(CASE WHEN q.status = 'pending' THEN 1 END),
+                    COALESCE(SUM(CASE WHEN q.status = 'pending' AND q.op IN ('create', 'update') THEN 1 ELSE 0 END), 0),
                     (SELECT COALESCE(SUM(i.size), 0)
                      FROM items i
                      WHERE i.id IN (SELECT DISTINCT file_id FROM upload_queue WHERE status='pending' AND op IN ('create', 'update'))
                     ),
-                    COALESCE(SUM(CASE WHEN q.op = 'trash' THEN 1 ELSE 0 END), 0)
+                    COALESCE(SUM(CASE WHEN q.status = 'pending' AND q.op = 'trash' THEN 1 ELSE 0 END), 0),
+                    COUNT(CASE WHEN q.status = 'failed' THEN 1 END)
                 FROM upload_queue q
-                WHERE q.status = 'pending'
             """)
             summary_row = cur.fetchone()
             tot_pending = summary_row[0] if summary_row else 0
             uploads_cnt = summary_row[1] if summary_row else 0
             upload_bytes = summary_row[2] if summary_row else 0
             trash_cnt = summary_row[3] if summary_row else 0
+            failed_cnt = summary_row[4] if summary_row else 0
             conn.close()
         except Exception as e:
             self.lbl_queue_status.setText(f"Error consultando cola: {e}")
             return
 
         self.table_queue.setRowCount(len(rows))
-        for row_idx, (qid, op, fid, iname, payload, fsize, status, attempts, created) in enumerate(rows):
+        for row_idx, (qid, op, fid, iname, payload, fsize, status, attempts, created, last_error) in enumerate(rows):
             dt_str = datetime.fromtimestamp(created).strftime("%Y-%m-%d %H:%M:%S") if created else "—"
 
             fname = iname
@@ -1707,34 +1751,224 @@ class GdsyncWindow(QMainWindow):
             else:
                 size_str = "Metadatos"
 
-            self.table_queue.setItem(row_idx, 0, QTableWidgetItem(str(qid)))
-            self.table_queue.setItem(row_idx, 1, QTableWidgetItem(op.upper()))
-            self.table_queue.setItem(row_idx, 2, QTableWidgetItem(display_name))
-            self.table_queue.setItem(row_idx, 3, QTableWidgetItem(size_str))
-            self.table_queue.setItem(row_idx, 4, QTableWidgetItem(status))
-            self.table_queue.setItem(row_idx, 5, QTableWidgetItem(str(attempts)))
-            self.table_queue.setItem(row_idx, 6, QTableWidgetItem(dt_str))
+            item_id = QTableWidgetItem(str(qid))
+            item_op = QTableWidgetItem(op.upper())
+            item_name = QTableWidgetItem(display_name)
+            item_size = QTableWidgetItem(size_str)
+            item_status = QTableWidgetItem(status)
+            item_attempts = QTableWidgetItem(str(attempts))
+            item_date = QTableWidgetItem(dt_str)
+
+            if status == "failed":
+                item_status.setForeground(QColor("#e53935"))
+                font = item_status.font()
+                font.setBold(True)
+                item_status.setFont(font)
+                if last_error:
+                    tooltip = f"Fallo al sincronizar:\n{last_error}\n\n(Hacé doble clic para ver el mensaje completo)"
+                    item_status.setToolTip(tooltip)
+                    item_name.setToolTip(tooltip)
+            elif status == "pending":
+                item_status.setForeground(QColor("#fb8c00"))
+
+            self.table_queue.setItem(row_idx, 0, item_id)
+            self.table_queue.setItem(row_idx, 1, item_op)
+            self.table_queue.setItem(row_idx, 2, item_name)
+            self.table_queue.setItem(row_idx, 3, item_size)
+            self.table_queue.setItem(row_idx, 4, item_status)
+            self.table_queue.setItem(row_idx, 5, item_attempts)
+            self.table_queue.setItem(row_idx, 6, item_date)
 
         self.previous_pending_uploads = tot_pending
 
-        if not rows or tot_pending == 0:
+        if hasattr(self, "btn_retry_failed"):
+            if failed_cnt > 0:
+                self.btn_retry_failed.setEnabled(True)
+                self.btn_retry_failed.setText(f"🔄 Reintentar fallidas ({failed_cnt})")
+                self.btn_retry_failed.setStyleSheet("font-weight: bold;")
+            else:
+                self.btn_retry_failed.setEnabled(False)
+                self.btn_retry_failed.setText("🔄 Reintentar fallidas")
+                self.btn_retry_failed.setStyleSheet("")
+
+        if not rows:
+            self.lbl_queue_status.setText("✅ Cola vacía. No hay tareas pendientes.")
+        elif tot_pending == 0 and failed_cnt > 0:
+            self.lbl_queue_status.setText(
+                f"⚠️ Hay {failed_cnt} tarea(s) fallida(s) en la cola. Hacé clic en 'Reintentar fallidas' para volver a intentar."
+            )
+        elif tot_pending == 0:
             self.lbl_queue_status.setText("✅ Todo sincronizado. No hay tareas pendientes en la cola.")
         elif uploads_cnt > 0 and trash_cnt > 0:
+            extra_failed = f" | ⚠️ {failed_cnt} fallidas" if failed_cnt > 0 else ""
             self.lbl_queue_status.setText(
-                f"Cola: {len(rows)} tareas recientes ({uploads_cnt} subidas: {format_bytes(upload_bytes)}, {trash_cnt} en papelera)."
+                f"Cola: {tot_pending} pendientes ({uploads_cnt} subidas: {format_bytes(upload_bytes)}, {trash_cnt} en papelera){extra_failed}."
             )
         elif uploads_cnt > 0:
+            extra_failed = f" | ⚠️ {failed_cnt} fallidas" if failed_cnt > 0 else ""
             self.lbl_queue_status.setText(
-                f"Cola: {len(rows)} tareas recientes ({uploads_cnt} archivos por subir: {format_bytes(upload_bytes)})."
+                f"Cola: {tot_pending} pendientes ({uploads_cnt} archivos: {format_bytes(upload_bytes)}){extra_failed}."
             )
         elif trash_cnt > 0:
+            extra_failed = f" | ⚠️ {failed_cnt} fallidas" if failed_cnt > 0 else ""
             self.lbl_queue_status.setText(
-                f"Cola: {len(rows)} tareas recientes ({trash_cnt} enviándose a papelera | 0 B por subir)."
+                f"Cola: {tot_pending} pendientes ({trash_cnt} en papelera){extra_failed}."
             )
         else:
+            extra_failed = f" | ⚠️ {failed_cnt} fallidas" if failed_cnt > 0 else ""
             self.lbl_queue_status.setText(
-                f"Cola: {len(rows)} tareas recientes ({tot_pending} pendientes)."
+                f"Cola: {tot_pending} pendientes{extra_failed}."
             )
+
+    def retry_failed_uploads_clicked(self):
+        selected_rows = self.table_queue.selectionModel().selectedRows()
+        selected_ids = []
+        for index in selected_rows:
+            try:
+                qid = int(self.table_queue.item(index.row(), 0).text())
+                selected_ids.append(qid)
+            except Exception:
+                pass
+
+        dbp = db_path()
+        if not dbp.exists():
+            return
+
+        try:
+            conn = sqlite3.connect(dbp)
+            cur = conn.cursor()
+            if selected_ids and len(selected_ids) < self.table_queue.rowCount():
+                placeholders = ",".join("?" for _ in selected_ids)
+                cur.execute(
+                    f"UPDATE upload_queue SET status='pending', attempts=0, last_error=NULL WHERE id IN ({placeholders})",
+                    selected_ids,
+                )
+                count = cur.rowcount
+            else:
+                cur.execute("UPDATE upload_queue SET status='pending', attempts=0, last_error=NULL WHERE status='failed'")
+                count = cur.rowcount
+            conn.commit()
+            conn.close()
+
+            # Despertar al daemon gdsyncd de inmediato
+            subprocess.call(["pkill", "-USR1", "-x", "gdsyncd"])
+
+            self.load_queue_from_db()
+            if count > 0:
+                self.notify("gdsync", f"Se reactivaron {count} tarea(s) para reintentar la subida.")
+            else:
+                QMessageBox.information(self, "Cola de Sincronización", "No se encontraron tareas fallidas para reintentar.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudieron reactivar las tareas: {e}")
+
+    def show_queue_context_menu(self, pos):
+        selected_rows = self.table_queue.selectionModel().selectedRows()
+        if not selected_rows:
+            return
+
+        menu = QMenu(self)
+        act_retry = menu.addAction("🔄 Reintentar tarea(s) seleccionada(s)")
+        act_retry.triggered.connect(self.retry_selected_tasks)
+
+        act_discard = menu.addAction("🗑️ Descartar tarea(s) de la cola")
+        act_discard.triggered.connect(self.discard_selected_tasks)
+
+        menu.addSeparator()
+        act_details = menu.addAction("ℹ️ Ver detalle del error")
+        act_details.triggered.connect(self.show_selected_task_error)
+
+        menu.exec(QCursor.pos())
+
+    def on_queue_item_double_clicked(self, item):
+        self.show_selected_task_error()
+
+    def show_selected_task_error(self):
+        selected_rows = self.table_queue.selectionModel().selectedRows()
+        if not selected_rows:
+            return
+        row = selected_rows[0].row()
+        qid_str = self.table_queue.item(row, 0).text()
+        name_str = self.table_queue.item(row, 2).text()
+        status_str = self.table_queue.item(row, 4).text()
+
+        dbp = db_path()
+        error_msg = "Sin mensaje de error registrado."
+        if dbp.exists():
+            try:
+                conn = sqlite3.connect(f"file:{dbp}?mode=ro", uri=True)
+                cur = conn.cursor()
+                cur.execute("SELECT last_error FROM upload_queue WHERE id=?", (int(qid_str),))
+                res = cur.fetchone()
+                if res and res[0]:
+                    error_msg = res[0]
+                conn.close()
+            except Exception as e:
+                error_msg = str(e)
+
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle(f"Detalle de Tarea #{qid_str}")
+        dlg.setText(f"<b>Elemento:</b> {name_str}<br><b>Estado:</b> {status_str}")
+        dlg.setDetailedText(error_msg)
+        if status_str == "failed":
+            dlg.setIcon(QMessageBox.Icon.Warning)
+        else:
+            dlg.setIcon(QMessageBox.Icon.Information)
+        dlg.exec()
+
+    def retry_selected_tasks(self):
+        selected_rows = self.table_queue.selectionModel().selectedRows()
+        if not selected_rows:
+            return
+        ids = [int(self.table_queue.item(r.row(), 0).text()) for r in selected_rows]
+        dbp = db_path()
+        if not dbp.exists():
+            return
+        try:
+            conn = sqlite3.connect(dbp)
+            cur = conn.cursor()
+            placeholders = ",".join("?" for _ in ids)
+            cur.execute(
+                f"UPDATE upload_queue SET status='pending', attempts=0, last_error=NULL WHERE id IN ({placeholders})",
+                ids,
+            )
+            count = cur.rowcount
+            conn.commit()
+            conn.close()
+            subprocess.call(["pkill", "-USR1", "-x", "gdsyncd"])
+            self.load_queue_from_db()
+            self.notify("gdsync", f"Se reactivaron {count} tarea(s) para reintentar.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudieron reintentar las tareas: {e}")
+
+    def discard_selected_tasks(self):
+        selected_rows = self.table_queue.selectionModel().selectedRows()
+        if not selected_rows:
+            return
+        ids = [int(self.table_queue.item(r.row(), 0).text()) for r in selected_rows]
+        resp = QMessageBox.question(
+            self,
+            "Descartar tareas",
+            f"¿Estás seguro de que querés descartar y eliminar {len(ids)} tarea(s) de la cola de sincronización?\n(Los archivos en tu equipo no se borrarán).",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        dbp = db_path()
+        if not dbp.exists():
+            return
+        try:
+            conn = sqlite3.connect(dbp)
+            cur = conn.cursor()
+            placeholders = ",".join("?" for _ in ids)
+            cur.execute(f"DELETE FROM upload_queue WHERE id IN ({placeholders})", ids)
+            count = cur.rowcount
+            conn.commit()
+            conn.close()
+            self.load_queue_from_db()
+            self.notify("gdsync", f"Se descartaron {count} tarea(s) de la cola.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudieron descartar las tareas: {e}")
 
     # ---- PESTAÑA SINCRONIZACIÓN SELECTIVA ----
     def sync_all_clicked(self):
@@ -1811,6 +2045,131 @@ class GdsyncWindow(QMainWindow):
         self.refresh_status_background()
 
     # ---- PESTAÑA CUENTA Y AUTENTICACIÓN ----
+    def show_google_cloud_tutorial(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Guía: Configurar Google Cloud Console para gdsync")
+        dlg.resize(780, 620)
+        vbox = QVBoxLayout(dlg)
+
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+
+        palette = self.palette()
+        bg_lightness = palette.color(palette.ColorRole.Base).lightness()
+        is_dark = bg_lightness < 128
+
+        if is_dark:
+            text_color = "#eff0f1"
+            subtext_color = "#bdc3c7"
+            link_color = "#3daee9"
+            title_color = "#3daee9"
+            step1_color = "#2ecc71"
+            step2_color = "#f39c12"
+            step3_color = "#3daee9"
+            step4_color = "#bb8fce"
+            warn_bg = "#3a2a14"
+            warn_border = "#f39c12"
+            warn_text = "#fad7a0"
+            code_bg = "#31363b"
+            code_color = "#f9e79f"
+            hr_color = "#454b51"
+        else:
+            text_color = "#212529"
+            subtext_color = "#495057"
+            link_color = "#1a73e8"
+            title_color = "#1a73e8"
+            step1_color = "#2e7d32"
+            step2_color = "#d84315"
+            step3_color = "#1565c0"
+            step4_color = "#6a1b9a"
+            warn_bg = "#fff3e0"
+            warn_border = "#ff9800"
+            warn_text = "#212529"
+            code_bg = "#f1f3f4"
+            code_color = "#b02a37"
+            hr_color = "#e0e0e0"
+
+        html = f"""
+        <div style='font-family: sans-serif; line-height: 1.6; color: {text_color};'>
+          <h2 style='color: {title_color}; margin-top: 0; margin-bottom: 12px;'>Guía Completa: Configurar Google Cloud Console para gdsync</h2>
+          <hr style='border: 0; border-top: 1px solid {hr_color}; margin: 12px 0 16px 0;'>
+
+          <h3 style='color: {step1_color}; margin-bottom: 8px;'>Paso 1: Crear el proyecto y activar la API de Drive</h3>
+          <ol style='color: {text_color}; padding-left: 24px; margin-top: 4px;'>
+            <li>Ingresá a <a href='https://console.cloud.google.com/' style='color: {link_color}; font-weight: bold;'>Google Cloud Console</a> con tu cuenta de Google.</li>
+            <li>Arriba a la izquierda, hacé clic en el selector de proyectos y seleccioná <b>«Proyecto nuevo»</b> (podés llamarlo <code style='background: {code_bg}; color: {code_color}; padding: 2px 6px; border-radius: 3px;'>gdsync</code>).</li>
+            <li>En el menú de navegación (o en el buscador superior), andá a <b>APIs y servicios &rarr; Biblioteca</b>.</li>
+            <li>Buscá <b>«Google Drive API»</b> y hacé clic en el botón <b>«Habilitar»</b>.</li>
+          </ol>
+
+          <h3 style='color: {step2_color}; margin-top: 20px; margin-bottom: 8px;'>Paso 2: Evitar que el token expire a los 7 días (Publicar la App)</h3>
+          <div style='background: {warn_bg}; padding: 12px 16px; border-left: 4px solid {warn_border}; border-radius: 4px; margin: 8px 0 12px 0; color: {warn_text};'>
+            <b>¿Por qué expira?</b> Por defecto, Google deja los proyectos nuevos en modo <i>«Prueba» (Testing)</i>, lo que causa que el token expire obligatoriamente a los 7 días (error <code>invalid_grant</code>). Pasándolo a producción no volverá a expirar jamás.
+          </div>
+          <ol style='color: {text_color}; padding-left: 24px; margin-top: 4px;'>
+            <li>En el menú lateral, andá a <b>APIs y servicios &rarr; Pantalla de consentimiento de OAuth</b> (ahora llamada <b>Google Auth Platform</b>).</li>
+            <li>Si te pide tipo de usuario, seleccioná <b>«Externo»</b> y completá el nombre de app (<code style='background: {code_bg}; color: {code_color}; padding: 2px 6px; border-radius: 3px;'>gdsync</code>) y tu correo de asistencia.</li>
+            <li>En el menú lateral izquierdo de Google Auth Platform, andá a <b>«Información de la marca»</b>:
+              <ul style='margin-top: 4px;'>
+                <li>En <b>Página principal de la app</b>, ingresá tu sitio web o una URL válida (ej: <code style='background: {code_bg}; color: {code_color}; padding: 2px 6px; border-radius: 3px;'>https://tiago.ar</code> o <code style='background: {code_bg}; color: {code_color}; padding: 2px 6px; border-radius: 3px;'>https://google.com</code>).</li>
+                <li>En <b>Vínculo a la Política de Privacidad</b>, ingresá una URL (ej: <code style='background: {code_bg}; color: {code_color}; padding: 2px 6px; border-radius: 3px;'>https://tiago.ar/privacy</code> o la misma URL).</li>
+                <li>Hacé clic en <b>«Guardar»</b> al final de la página.</li>
+              </ul>
+            </li>
+            <li style='margin-top: 6px;'>Ahora hacé clic en la pestaña <b>«Público»</b>:
+              <ul style='margin-top: 4px;'>
+                <li>Verás que el <b>Estado de publicación</b> dice <i>«Prueba»</i>.</li>
+                <li>Hacé clic en el botón <b>«Publicar app»</b> y luego en <b>«Confirmar»</b>.</li>
+                <li><b>Nota:</b> NO necesitás pagar ni enviar tu app a revisión oficial con Google. Al ser para tu uso personal, queda publicada y el acceso será permanente.</li>
+              </ul>
+            </li>
+          </ol>
+
+          <h3 style='color: {step3_color}; margin-top: 20px; margin-bottom: 8px;'>Paso 3: Crear las Credenciales (client_secret)</h3>
+          <ol style='color: {text_color}; padding-left: 24px; margin-top: 4px;'>
+            <li>En el menú lateral, andá a <b>APIs y servicios &rarr; Credenciales</b>.</li>
+            <li>Hacé clic en <b>«+ CREAR CREDENCIALES» &rarr; «ID de cliente de OAuth»</b>.</li>
+            <li>En <i>Tipo de aplicación</i>, elegí <b>«App de escritorio»</b> (Desktop app).</li>
+            <li>De nombre ingresá <code style='background: {code_bg}; color: {code_color}; padding: 2px 6px; border-radius: 3px;'>gdsync-desktop</code> y presioná <b>«Crear»</b>.</li>
+            <li>En la ventana emergente, hacé clic en <b>«Descargar JSON»</b> (se guardará un archivo como <code style='background: {code_bg}; color: {code_color}; padding: 2px 6px; border-radius: 3px;'>client_secret_*.json</code> en tu carpeta de Descargas).</li>
+          </ol>
+
+          <h3 style='color: {step4_color}; margin-top: 20px; margin-bottom: 8px;'>Paso 4: Conectar gdsync e Iniciar Sesión</h3>
+          <ol style='color: {text_color}; padding-left: 24px; margin-top: 4px;'>
+            <li>En esta pestaña <b>👤 Cuenta y Conexión</b> de gdsync, presioná el botón:<br>
+            <b>«📄 Importar archivo JSON de Google (client_secret_*.json)...»</b> y elegí el archivo descargado.</li>
+            <li>Hacé clic en el botón verde <b>«🔑 Iniciar Sesión con Google (OAuth 2.0)»</b>.</li>
+            <li>Se abrirá tu navegador web:
+              <ul style='margin-top: 4px;'>
+                <li>Elegí tu cuenta de Google.</li>
+                <li>Si aparece una advertencia de <i>«Google no verificó esta app»</i>, hacé clic en <b>«Configuración avanzada»</b> &rarr; <b>«Ir a gdsync (no seguro)»</b> &rarr; <b>«Continuar»</b>.</li>
+              </ul>
+            </li>
+          </ol>
+
+          <p style='margin-top: 18px; font-size: 15px; font-weight: bold; color: {step1_color};'>
+            ¡Listo! Tu unidad de Google Drive quedará conectada de forma permanente y tus archivos se sincronizarán automáticamente.
+          </p>
+        </div>
+        """
+        browser.setHtml(html)
+        vbox.addWidget(browser)
+
+        btn_box = QHBoxLayout()
+        btn_open_cloud = QPushButton("🌐 Abrir Google Cloud Console en el navegador")
+        btn_open_cloud.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DesktopIcon))
+        btn_open_cloud.clicked.connect(lambda: subprocess.Popen(["xdg-open", "https://console.cloud.google.com/"]))
+        btn_box.addWidget(btn_open_cloud)
+
+        btn_box.addStretch()
+
+        btn_close = QPushButton("Entendido / Cerrar")
+        btn_close.clicked.connect(dlg.accept)
+        btn_box.addWidget(btn_close)
+
+        vbox.addLayout(btn_box)
+        dlg.exec()
+
     def toggle_secret_visibility(self):
         if self.txt_client_secret.echoMode() == QLineEdit.EchoMode.Password:
             self.txt_client_secret.setEchoMode(QLineEdit.EchoMode.Normal)
@@ -1944,6 +2303,7 @@ class GdsyncWindow(QMainWindow):
         self.cfg["mount_point"] = mount
         self.cfg["cache_max_gb"] = self.spin_cache.value()
         self.cfg["poll_interval_secs"] = self.spin_poll.value()
+        self.cfg["auto_retry_secs"] = self.spin_auto_retry.value() * 60
         self.cfg["notifications_enabled"] = self.chk_notifications.isChecked()
         self.cfg["persistent_upload_notify"] = self.chk_persistent_notify.isChecked()
         self.cfg["close_to_tray"] = self.chk_close_to_tray.isChecked()
