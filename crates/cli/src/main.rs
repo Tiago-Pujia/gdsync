@@ -486,6 +486,10 @@ async fn main() -> Result<()> {
                         "Carpetas sinc.:       {}",
                         if cfg.is_syncing_all() { "Toda la unidad (root)".into() } else { format!("{:?}", cfg.sync_folders) }
                     );
+                    println!(
+                        "Notificaciones:       {}",
+                        if cfg.notifications_enabled { "Activadas" } else { "Desactivadas" }
+                    );
                     if cfg.client_id.is_empty() {
                         println!("Sesión:               No configurada (ejecutá `gdsync login`)");
                     }
@@ -802,6 +806,11 @@ fn copy_to_clipboard(text: &str) -> bool {
 }
 
 fn notify_desktop(title: &str, message: &str, icon: &str) {
+    if let Ok(cfg) = Config::load() {
+        if !cfg.notifications_enabled {
+            return;
+        }
+    }
     let _ = std::process::Command::new("notify-send")
         .args(["-a", "gdsync", "-i", icon, title, message])
         .spawn();

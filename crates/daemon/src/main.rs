@@ -114,7 +114,7 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                if total_uploaded > 0 {
+                if total_uploaded > 0 && active_cfg.notifications_enabled {
                     let gui_active = std::path::Path::new("/tmp/gdsync_gui_ipc").exists()
                         || std::env::var("XDG_RUNTIME_DIR")
                             .map(|d| std::path::Path::new(&d).join("gdsync_gui_ipc").exists())

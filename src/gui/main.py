@@ -1136,13 +1136,20 @@ class GdsyncWindow(QMainWindow):
                 if hasattr(self, "tray_status_action"):
                     self.tray_status_action.setText("✅ Todo sincronizado")
 
-        if not notifications_on or not persistent_on:
+        if not notifications_on:
             if self.queue_notification_id is not None:
                 self.close_queue_notification()
+            self.last_notified_pending = None
             return
 
         current_key = (total, uploads, upload_bytes, trashes)
         if total > 0:
+            if not persistent_on:
+                if self.queue_notification_id is not None:
+                    self.close_queue_notification()
+                self.last_notified_pending = current_key
+                return
+
             if self.queue_notification_id is not None and self.last_notified_pending == current_key:
                 return
 
@@ -1395,6 +1402,17 @@ class GdsyncWindow(QMainWindow):
                     )
                     self.bar_cloud.setValue(pct_cloud)
                     self.bar_cloud.setFormat(f"{format_bytes(used)} / {format_bytes(tot)} ({pct_cloud}%)")
+
+                    if pct_cloud >= 90:
+                        if not self.quota_notified:
+                            self.quota_notified = True
+                            self.notify(
+                                "Google Drive - Almacenamiento casi lleno",
+                                f"Has utilizado el {pct_cloud}% de tu almacenamiento en Google Drive ({format_bytes(used)} de {format_bytes(tot)}).",
+                                is_warning=True,
+                            )
+                    elif pct_cloud < 85:
+                        self.quota_notified = False
             except Exception:
                 pass
 

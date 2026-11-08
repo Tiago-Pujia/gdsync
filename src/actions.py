@@ -13,7 +13,8 @@ import subprocess
 from pathlib import Path
 
 def get_config():
-    cfg_path = Path.home() / ".config" / "gdsync" / "config.json"
+    cfg_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "gdsync"
+    cfg_path = cfg_dir / "config.json"
     if cfg_path.exists():
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
@@ -34,6 +35,8 @@ def format_size(bytes_val):
     return f"{val:.1f} PB"
 
 def notify(title, message, icon="folder-gdrive"):
+    if not get_config().get("notifications_enabled", True):
+        return
     try:
         subprocess.Popen(
             ["notify-send", "-a", "gdsync", "-i", icon, title, message],

@@ -37,6 +37,15 @@ pub struct Config {
     /// Auto-retry failed uploads interval in seconds (0 = disabled, default 300 = 5 minutes).
     #[serde(default = "default_auto_retry_secs")]
     pub auto_retry_secs: u64,
+    /// Whether desktop notifications are enabled.
+    #[serde(default = "default_notifications_enabled")]
+    pub notifications_enabled: bool,
+    /// Whether persistent desktop notification for pending uploads is enabled.
+    #[serde(default = "default_persistent_upload_notify")]
+    pub persistent_upload_notify: bool,
+    /// Whether to minimize to tray on close.
+    #[serde(default = "default_close_to_tray")]
+    pub close_to_tray: bool,
 }
 
 fn default_mount() -> PathBuf {
@@ -54,6 +63,15 @@ fn default_sync_folders() -> Vec<String> {
 fn default_auto_retry_secs() -> u64 {
     300
 }
+fn default_notifications_enabled() -> bool {
+    true
+}
+fn default_persistent_upload_notify() -> bool {
+    true
+}
+fn default_close_to_tray() -> bool {
+    false
+}
 
 impl Config {
     pub fn new(client_id: String, client_secret: String) -> Self {
@@ -65,6 +83,9 @@ impl Config {
             cache_max_gb: default_cache_gb(),
             sync_folders: default_sync_folders(),
             auto_retry_secs: default_auto_retry_secs(),
+            notifications_enabled: default_notifications_enabled(),
+            persistent_upload_notify: default_persistent_upload_notify(),
+            close_to_tray: default_close_to_tray(),
         }
     }
     pub fn path() -> PathBuf {
@@ -223,11 +244,29 @@ mod tests {
         assert_eq!(cfg.cache_max_gb, 10);
         assert_eq!(cfg.sync_folders, vec!["root".to_string()]);
         assert!(cfg.is_syncing_all());
+        assert!(cfg.notifications_enabled);
+        assert!(cfg.persistent_upload_notify);
+        assert!(!cfg.close_to_tray);
 
         let serialized = serde_json::to_string(&cfg).unwrap();
         let parsed: Config = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed.client_id, "foo");
         assert_eq!(parsed.cache_max_gb, 10);
+        assert!(parsed.notifications_enabled);
+        assert!(parsed.persistent_upload_notify);
+        assert!(!parsed.close_to_tray);
+
+        let disabled_json = r#"{
+            "client_id": "foo",
+            "client_secret": "bar",
+            "notifications_enabled": false,
+            "persistent_upload_notify": false,
+            "close_to_tray": true
+        }"#;
+        let disabled_cfg: Config = serde_json::from_str(disabled_json).unwrap();
+        assert!(!disabled_cfg.notifications_enabled);
+        assert!(!disabled_cfg.persistent_upload_notify);
+        assert!(disabled_cfg.close_to_tray);
     }
 
     #[test]
