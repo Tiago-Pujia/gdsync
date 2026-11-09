@@ -26,6 +26,7 @@ pub struct GuiController {
     active_search_query: Arc<Mutex<String>>,
     active_filter_idx: Arc<Mutex<i32>>,
     pinned_search_query: Arc<Mutex<String>>,
+    last_quota_fetch: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl GuiController {
@@ -49,6 +50,7 @@ impl GuiController {
             active_search_query: Arc::new(Mutex::new(String::new())),
             active_filter_idx: Arc::new(Mutex::new(0)),
             pinned_search_query: Arc::new(Mutex::new(String::new())),
+            last_quota_fetch: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -141,6 +143,7 @@ impl GuiController {
         {
             let this = self.clone();
             app.on_sync_now(move || {
+                *this.last_quota_fetch.lock().unwrap() = None;
                 this.show_toast("Sincronización", "Consultando cambios en Google Drive...", false);
                 let this = this.clone();
                 if let Some(drive) = this.get_drive() {
@@ -623,30 +626,43 @@ impl GuiController {
             app.set_queue_items(ModelRc::from(Rc::new(VecModel::from(entries))));
         }
 
-        // Fetch storage quota periodically in background if logged in
+        // Fetch storage quota periodically in background if logged in (throttled to once every 60s)
         if is_logged {
-            if let Some(drive) = self.get_drive() {
-                let app_weak = self.app.clone();
-                let notif = self.notifications.clone();
-                let notif_enabled = self.cfg.lock().unwrap().notifications_enabled;
-
-                tokio::spawn(async move {
-                    if let Ok((used, total)) = drive.about_storage().await {
-                        let pct = if total > 0 { (used as f32) / (total as f32) } else { 0.0 };
-                        let used_str = format_bytes(used);
-                        let total_str = format_bytes(total);
-
-                        notif.lock().unwrap().check_quota_warning(used, total, notif_enabled);
-
-                        slint::invoke_from_event_loop(move || {
-                            if let Some(w) = app_weak.upgrade() {
-                                w.set_drive_used_str(used_str.into());
-                                w.set_drive_total_str(total_str.into());
-                                w.set_drive_pct(pct);
-                            }
-                        }).ok();
+            let should_fetch = {
+                let mut last = self.last_quota_fetch.lock().unwrap();
+                match *last {
+                    Some(instant) if instant.elapsed() < Duration::from_secs(60) => false,
+                    _ => {
+                        *last = Some(std::time::Instant::now());
+                        true
                     }
-                });
+                }
+            };
+
+            if should_fetch {
+                if let Some(drive) = self.get_drive() {
+                    let app_weak = self.app.clone();
+                    let notif = self.notifications.clone();
+                    let notif_enabled = self.cfg.lock().unwrap().notifications_enabled;
+
+                    tokio::spawn(async move {
+                        if let Ok((used, total)) = drive.about_storage().await {
+                            let pct = if total > 0 { (used as f32) / (total as f32) } else { 0.0 };
+                            let used_str = format_bytes(used);
+                            let total_str = format_bytes(total);
+
+                            notif.lock().unwrap().check_quota_warning(used, total, notif_enabled);
+
+                            slint::invoke_from_event_loop(move || {
+                                if let Some(w) = app_weak.upgrade() {
+                                    w.set_drive_used_str(used_str.into());
+                                    w.set_drive_total_str(total_str.into());
+                                    w.set_drive_pct(pct);
+                                }
+                            }).ok();
+                        }
+                    });
+                }
             }
         }
     }
