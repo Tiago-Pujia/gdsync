@@ -1,0 +1,100 @@
+import { Theme } from "../theme.slint";
+
+export component ErrorModal inherits Rectangle {
+    in property <bool> is-open: false;
+    in property <string> title: "Ocurrió un error";
+    in property <string> error-text: "";
+
+    callback close();
+
+    width: 100%;
+    height: 100%;
+    background: #00000099;
+    visible: root.is-open;
+
+    TouchArea {
+        clicked => { root.close(); }
+    }
+
+    Rectangle {
+        width: 480px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.bg-card;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        clip: true;
+
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 16px;
+
+            // Icon & Title
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: start;
+                Text {
+                    text: "❌";
+                    font-size: 22px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.title;
+                    font-size: 16px;
+                    font-weight: 700;
+                    color: Theme.danger;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+
+            // Error Text Box
+            Rectangle {
+                background: Theme.bg-surface;
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: Theme.border-color;
+
+                VerticalLayout {
+                    padding: 12px;
+                    Text {
+                        text: root.error-text;
+                        font-family: "monospace";
+                        font-size: 12px;
+                        color: Theme.text-main;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            // Buttons
+            HorizontalLayout {
+                alignment: end;
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: touch_ok.has-hover ? Theme.accent-hover : Theme.accent;
+                    height: 34px;
+                    HorizontalLayout {
+                        padding-left: 18px;
+                        padding-right: 18px;
+                        Text {
+                            text: "Aceptar";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: white;
+                            vertical-alignment: center;
+                        }
+                    }
+                    touch_ok := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.close(); }
+                    }
+                }
+            }
+        }
+    }
+}

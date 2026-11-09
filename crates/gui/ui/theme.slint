@@ -1,0 +1,24 @@
+export global Theme {
+    in-out property <bool> is-dark: true;
+
+    out property <color> bg-app: is-dark ? #12151b : #f4f6fa;
+    out property <color> bg-sidebar: is-dark ? #181c24 : #ebedf2;
+    out property <color> bg-surface: is-dark ? #1e232e : #ffffff;
+    out property <color> bg-surface-hover: is-dark ? #262c3a : #f1f4f9;
+    out property <color> bg-card: is-dark ? #202633 : #ffffff;
+    out property <color> bg-card-hover: is-dark ? #272e3d : #f8fafc;
+    out property <color> border-color: is-dark ? #ffffff14 : #00000017;
+    out property <color> text-main: is-dark ? #f0f3f8 : #1e293b;
+    out property <color> text-secondary: is-dark ? #9aa5b8 : #475569;
+    out property <color> text-muted: is-dark ? #647087 : #94a3b8;
+    out property <color> accent: is-dark ? #3b82f6 : #2563eb;
+    out property <color> accent-hover: is-dark ? #2563eb : #1d4ed8;
+    out property <color> success: is-dark ? #10b981 : #059669;
+    out property <color> warning: is-dark ? #f59e0b : #d97706;
+    out property <color> danger: is-dark ? #ef4444 : #dc2626;
+
+    out property <length> radius-sm: 6px;
+    out property <length> radius-md: 10px;
+    out property <length> radius-lg: 14px;
+    out property <length> radius-xl: 18px;
+}

@@ -1,0 +1,896 @@
+import { Theme } from "../theme.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export component TutorialModal inherits Rectangle {
+    in property <bool> is-open: false;
+    in-out property <int> current-step: 0;
+    in-out property <bool> view-all: false;
+
+    callback close();
+    callback open-console-link();
+
+    width: 100%;
+    height: 100%;
+    background: #000000a6;
+    visible: root.is-open;
+
+    TouchArea {
+        clicked => { root.close(); }
+    }
+
+    Rectangle {
+        width: 780px;
+        height: 515px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.bg-card;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        clip: true;
+
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 22px;
+            spacing: 16px;
+
+            // 1. Header
+            HorizontalLayout {
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 38px;
+                        height: 38px;
+                        border-radius: 10px;
+                        background: #3b82f61a;
+                        border-width: 1px;
+                        border-color: #3b82f640;
+
+                        Text {
+                            text: "☁️";
+                            font-size: 18px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 2px;
+                        alignment: center;
+
+                        Text {
+                            text: "Guía: Configurar Google Cloud Console";
+                            font-size: 16px;
+                            font-weight: 700;
+                            color: Theme.text-main;
+                        }
+
+                        Text {
+                            text: "Crea tus propias credenciales OAuth 2.0 seguras y gratuitas en 5 pasos (~2 min)";
+                            font-size: 11px;
+                            color: Theme.text-secondary;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: end;
+
+                    // Mode Switcher Capsule
+                    Rectangle {
+                        height: 30px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.bg-surface;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        HorizontalLayout {
+                            padding: 3px;
+                            spacing: 3px;
+
+                            Rectangle {
+                                border-radius: 4px;
+                                background: !root.view-all ? Theme.accent : transparent;
+                                HorizontalLayout {
+                                    padding-left: 9px;
+                                    padding-right: 9px;
+                                    alignment: center;
+                                    Text {
+                                        text: "🎯 Guiado";
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        color: !root.view-all ? white : Theme.text-secondary;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.view-all = false; }
+                                }
+                            }
+
+                            Rectangle {
+                                border-radius: 4px;
+                                background: root.view-all ? Theme.accent : transparent;
+                                HorizontalLayout {
+                                    padding-left: 9px;
+                                    padding-right: 9px;
+                                    alignment: center;
+                                    Text {
+                                        text: "📋 Todos los pasos";
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        color: root.view-all ? white : Theme.text-secondary;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.view-all = true; }
+                                }
+                            }
+                        }
+                    }
+
+                    // Close Button
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: 15px;
+                        background: touch_close.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                        border-width: 1px;
+                        border-color: touch_close.has-hover ? #ffffff2e : Theme.border-color;
+
+                        Text {
+                            text: "✕";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: touch_close.has-hover ? Theme.text-main : Theme.text-secondary;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        touch_close := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.close(); }
+                        }
+                    }
+                }
+            }
+
+            // 2. Interactive Stepper Navigation (Only in Guided Mode)
+            if !root.view-all: HorizontalLayout {
+                spacing: 8px;
+                height: 34px;
+
+                // Step 0 Capsule
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: Theme.radius-sm;
+                    background: root.current-step == 0 ? Theme.accent : (touch_s0.has-hover ? Theme.bg-surface-hover : Theme.bg-surface);
+                    border-width: 1px;
+                    border-color: root.current-step == 0 ? Theme.accent : Theme.border-color;
+
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        Rectangle {
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: root.current-step == 0 ? white : (root.current-step > 0 ? Theme.success : #ffffff1f);
+                            Text {
+                                text: root.current-step > 0 ? "✓" : "1";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: root.current-step == 0 ? Theme.accent : (root.current-step > 0 ? white : Theme.text-secondary);
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Text {
+                            text: "1. Proyecto";
+                            font-size: 11px;
+                            font-weight: root.current-step == 0 ? 600 : 500;
+                            color: root.current-step == 0 ? white : Theme.text-main;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    touch_s0 := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.current-step = 0; }
+                    }
+                }
+
+                // Step 1 Capsule
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: Theme.radius-sm;
+                    background: root.current-step == 1 ? Theme.accent : (touch_s1.has-hover ? Theme.bg-surface-hover : Theme.bg-surface);
+                    border-width: 1px;
+                    border-color: root.current-step == 1 ? Theme.accent : Theme.border-color;
+
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        Rectangle {
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: root.current-step == 1 ? white : (root.current-step > 1 ? Theme.success : #ffffff1f);
+                            Text {
+                                text: root.current-step > 1 ? "✓" : "2";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: root.current-step == 1 ? Theme.accent : (root.current-step > 1 ? white : Theme.text-secondary);
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Text {
+                            text: "2. API Drive";
+                            font-size: 11px;
+                            font-weight: root.current-step == 1 ? 600 : 500;
+                            color: root.current-step == 1 ? white : Theme.text-main;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    touch_s1 := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.current-step = 1; }
+                    }
+                }
+
+                // Step 2 Capsule
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: Theme.radius-sm;
+                    background: root.current-step == 2 ? Theme.accent : (touch_s2.has-hover ? Theme.bg-surface-hover : Theme.bg-surface);
+                    border-width: 1px;
+                    border-color: root.current-step == 2 ? Theme.accent : Theme.border-color;
+
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        Rectangle {
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: root.current-step == 2 ? white : (root.current-step > 2 ? Theme.success : #ffffff1f);
+                            Text {
+                                text: root.current-step > 2 ? "✓" : "3";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: root.current-step == 2 ? Theme.accent : (root.current-step > 2 ? white : Theme.text-secondary);
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Text {
+                            text: "3. OAuth";
+                            font-size: 11px;
+                            font-weight: root.current-step == 2 ? 600 : 500;
+                            color: root.current-step == 2 ? white : Theme.text-main;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    touch_s2 := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.current-step = 2; }
+                    }
+                }
+
+                // Step 3 Capsule
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: Theme.radius-sm;
+                    background: root.current-step == 3 ? Theme.accent : (touch_s3.has-hover ? Theme.bg-surface-hover : Theme.bg-surface);
+                    border-width: 1px;
+                    border-color: root.current-step == 3 ? Theme.accent : Theme.border-color;
+
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        Rectangle {
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: root.current-step == 3 ? white : (root.current-step > 3 ? Theme.success : #ffffff1f);
+                            Text {
+                                text: root.current-step > 3 ? "✓" : "4";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: root.current-step == 3 ? Theme.accent : (root.current-step > 3 ? white : Theme.text-secondary);
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Text {
+                            text: "4. Credencial";
+                            font-size: 11px;
+                            font-weight: root.current-step == 3 ? 600 : 500;
+                            color: root.current-step == 3 ? white : Theme.text-main;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    touch_s3 := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.current-step = 3; }
+                    }
+                }
+
+                // Step 4 Capsule
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: Theme.radius-sm;
+                    background: root.current-step == 4 ? Theme.success : (touch_s4.has-hover ? Theme.bg-surface-hover : Theme.bg-surface);
+                    border-width: 1px;
+                    border-color: root.current-step == 4 ? Theme.success : Theme.border-color;
+
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        Rectangle {
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: root.current-step == 4 ? white : #ffffff1f;
+                            Text {
+                                text: "5";
+                                font-size: 10px;
+                                font-weight: 700;
+                                color: root.current-step == 4 ? Theme.success : Theme.text-secondary;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Text {
+                            text: "5. Descargar";
+                            font-size: 11px;
+                            font-weight: root.current-step == 4 ? 600 : 500;
+                            color: root.current-step == 4 ? white : Theme.text-main;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    touch_s4 := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.current-step = 4; }
+                    }
+                }
+            }
+
+            // 3A. Guided Mode Main Step Card
+            if !root.view-all: Rectangle {
+                vertical-stretch: 1;
+                background: Theme.bg-surface;
+                border-radius: Theme.radius-md;
+                border-width: 1px;
+                border-color: Theme.border-color;
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 12px;
+                    alignment: start;
+
+                    // Top row: Step tag and badge
+                    HorizontalLayout {
+                        alignment: space-between;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+
+                            // Step Number Badge
+                            Rectangle {
+                                border-radius: Theme.radius-sm;
+                                background: root.current-step == 4 ? #10b98126 : #3b82f626;
+                                border-width: 1px;
+                                border-color: root.current-step == 4 ? Theme.success : Theme.accent;
+                                height: 24px;
+
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    alignment: center;
+                                    Text {
+                                        text: root.current-step == 0 ? "PASO 1 DE 5" :
+                                              root.current-step == 1 ? "PASO 2 DE 5" :
+                                              root.current-step == 2 ? "PASO 3 DE 5" :
+                                              root.current-step == 3 ? "PASO 4 DE 5" : "PASO 5 DE 5 (FINAL)";
+                                        font-size: 10px;
+                                        font-weight: 700;
+                                        color: root.current-step == 4 ? Theme.success : Theme.accent;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Code / URL tag
+                        Rectangle {
+                            border-radius: Theme.radius-sm;
+                            background: #00000030;
+                            border-width: 1px;
+                            border-color: Theme.border-color;
+                            height: 24px;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                alignment: center;
+                                Text {
+                                    text: root.current-step == 0 ? "console.cloud.google.com" :
+                                          root.current-step == 1 ? "Google Drive API" :
+                                          root.current-step == 2 ? "Test Users / Usuarios de prueba" :
+                                          root.current-step == 3 ? "Desktop App (App de escritorio)" : "client_secret_*.json";
+                                    font-size: 11px;
+                                    color: Theme.text-secondary;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    // Step Title
+                    Text {
+                        text: root.current-step == 0 ? "Crear un Proyecto en Google Cloud" :
+                              root.current-step == 1 ? "Habilitar la API de Google Drive" :
+                              root.current-step == 2 ? "Pantalla de Consentimiento OAuth & Usuarios de Prueba" :
+                              root.current-step == 3 ? "Crear ID de Cliente OAuth 2.0 (App de escritorio)" :
+                              "Descargar credenciales JSON e Importar en gdsync";
+                        font-size: 17px;
+                        font-weight: 700;
+                        color: Theme.text-main;
+                    }
+
+                    // Detailed Instructions
+                    Text {
+                        text: root.current-step == 0 ?
+                              "1. Entrá a Google Cloud Console (console.cloud.google.com) e iniciá sesión con tu cuenta de Google.\n2. En la barra superior, hacé clic en el selector desplegable de proyectos y presioná 'Proyecto nuevo'.\n3. Asignale un nombre que recuerdes (ej: 'gdsync') y presioná el botón 'Crear'." :
+                              root.current-step == 1 ?
+                              "1. En el menú lateral izquierdo (☰), andá a 'APIs y servicios' > 'Biblioteca'.\n2. En el cuadro de búsqueda central, escribí 'Google Drive API' y presioná Enter.\n3. Hacé clic sobre la tarjeta de 'Google Drive API' y presioná el botón azul 'Habilitar'." :
+                              root.current-step == 2 ?
+                              "1. En el menú lateral, andá a 'APIs y servicios' > 'Pantalla de consentimiento de OAuth'.\n2. Seleccioná el tipo de usuario 'Externo' y hacé clic en 'Crear'.\n3. Ingresá el nombre de la app (ej: gdsync) y tu correo de asistencia y desarrollador.\n4. En la pestaña 'Permisos' presioná 'Guardar y continuar'.\n5. En la pestaña 'Usuarios de prueba', hacé clic en '+ ADD USERS' y agregá tu propio Gmail." :
+                              root.current-step == 3 ?
+                              "1. En el menú lateral, andá a 'APIs y servicios' > 'Credenciales'.\n2. Hacé clic arriba en '+ Crear credenciales' y elegí 'ID de cliente de OAuth'.\n3. En el desplegable 'Tipo de aplicación', es indispensable seleccionar 'App de escritorio' (Desktop application).\n4. Podés nombrarlo 'gdsync desktop' y hacer clic en 'Crear'." :
+                              "1. En la lista de credenciales creadas, hacé clic en la flecha de descarga ⬇ (icono a la derecha de tu ID de cliente).\n2. Se descargará un archivo llamado client_secret_*.json a tu carpeta de Descargas.\n3. Cerrá esta ventana, andá a la pestaña 'Cuenta & Google' de gdsync y hacé clic en 'Examinar archivo JSON...'.\n4. Presioná 'Iniciar Sesión con Google' para autorizar el acceso en tu navegador.";
+                        font-size: 13px;
+                        color: Theme.text-main;
+                        wrap: word-wrap;
+                    }
+
+                    // Spacer: pushes callout card to bottom of the step container
+                    Rectangle {
+                        vertical-stretch: 1;
+                    }
+
+                    // Callout Card (Tips & Warnings) pinned to the bottom
+                    Rectangle {
+                        border-radius: Theme.radius-sm;
+                        background: root.current-step == 2 ? #f59e0b1a :
+                                    root.current-step == 4 ? #10b9811a : #3b82f61a;
+                        border-width: 1px;
+                        border-color: root.current-step == 2 ? #f59e0b4d :
+                                      root.current-step == 4 ? #10b9814d : #3b82f64d;
+
+                        HorizontalLayout {
+                            padding: 12px;
+                            spacing: 10px;
+                            alignment: start;
+
+                            Text {
+                                text: root.current-step == 2 ? "⚠️" : (root.current-step == 4 ? "🎉" : "💡");
+                                font-size: 16px;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: root.current-step == 0 ?
+                                      "Consejo: El uso personal de Google Drive API mediante este proyecto es 100% gratuito y no requiere ingresar tarjetas de crédito ni facturación." :
+                                      root.current-step == 1 ?
+                                      "Atención: Asegurate de elegir exactamente 'Google Drive API' (no Google Docs API ni Google Sheets API)." :
+                                      root.current-step == 2 ?
+                                      "¡PASO CRUCIAL!: Si no agregás tu cuenta de Gmail a 'Usuarios de prueba', Google bloqueará el inicio de sesión con el mensaje 'Acceso bloqueado: la app no completó el proceso de verificación'." :
+                                      root.current-step == 3 ?
+                                      "Selección obligatoria: Debe ser 'App de escritorio'. Si seleccionás 'Aplicación web', el login local del navegador no se completará." :
+                                      "¡Completado!: Al importar tu JSON privado, tus credenciales quedarán guardadas permanentemente y sincronizarás a máxima velocidad.";
+                                font-size: 12px;
+                                font-weight: 500;
+                                color: root.current-step == 2 ? Theme.warning :
+                                       root.current-step == 4 ? Theme.success : Theme.accent;
+                                wrap: word-wrap;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3B. Full List View (Scrollable All Steps)
+            if root.view-all: Rectangle {
+                vertical-stretch: 1;
+                background: Theme.bg-surface;
+                border-radius: Theme.radius-md;
+                border-width: 1px;
+                border-color: Theme.border-color;
+                clip: true;
+
+                ScrollView {
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 12px;
+
+                        // Paso 1 Card
+                        Rectangle {
+                            background: Theme.bg-card;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border-color;
+
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 8px;
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        alignment: start;
+                                        Rectangle {
+                                            width: 22px;
+                                            height: 22px;
+                                            border-radius: 11px;
+                                            background: Theme.accent;
+                                            Text { text: "1"; font-size: 11px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                        }
+                                        Text { text: "Crear un Proyecto en Google Cloud"; font-size: 13px; font-weight: 700; color: Theme.text-main; vertical-alignment: center; }
+                                    }
+                                    Text { text: "Paso 1"; font-size: 11px; color: Theme.text-secondary; vertical-alignment: center; }
+                                }
+
+                                Text {
+                                    text: "Ingresá a Google Cloud Console (console.cloud.google.com), hacé clic en el selector de proyectos arriba y seleccioná 'Proyecto nuevo'. Podés nombrarlo 'gdsync'.";
+                                    font-size: 12px;
+                                    color: Theme.text-main;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        // Paso 2 Card
+                        Rectangle {
+                            background: Theme.bg-card;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border-color;
+
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 8px;
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        alignment: start;
+                                        Rectangle {
+                                            width: 22px;
+                                            height: 22px;
+                                            border-radius: 11px;
+                                            background: Theme.accent;
+                                            Text { text: "2"; font-size: 11px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                        }
+                                        Text { text: "Habilitar la API de Google Drive"; font-size: 13px; font-weight: 700; color: Theme.text-main; vertical-alignment: center; }
+                                    }
+                                    Text { text: "Paso 2"; font-size: 11px; color: Theme.text-secondary; vertical-alignment: center; }
+                                }
+
+                                Text {
+                                    text: "En el menú lateral, andá a 'APIs y servicios' > 'Biblioteca'. Buscá 'Google Drive API' y hacé clic en el botón azul 'Habilitar'.";
+                                    font-size: 12px;
+                                    color: Theme.text-main;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        // Paso 3 Card
+                        Rectangle {
+                            background: Theme.bg-card;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: #f59e0b4d;
+
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 8px;
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        alignment: start;
+                                        Rectangle {
+                                            width: 22px;
+                                            height: 22px;
+                                            border-radius: 11px;
+                                            background: Theme.warning;
+                                            Text { text: "3"; font-size: 11px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                        }
+                                        Text { text: "Pantalla de Consentimiento & Usuarios de Prueba"; font-size: 13px; font-weight: 700; color: Theme.text-main; vertical-alignment: center; }
+                                    }
+                                    Text { text: "Paso 3 • Crucial"; font-size: 11px; font-weight: 600; color: Theme.warning; vertical-alignment: center; }
+                                }
+
+                                Text {
+                                    text: "Andá a 'APIs y servicios' > 'Pantalla de consentimiento de OAuth'. Elegí 'Externo'. Completá el nombre de la app (ej. gdsync) y tu correo de contacto.\n\n⚠️ ¡MUY IMPORTANTE!: En la pestaña 'Usuarios de prueba' (Test users), agregá tu propia cuenta de Gmail. Sin esto Google bloqueará el inicio de sesión.";
+                                    font-size: 12px;
+                                    color: Theme.text-main;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        // Paso 4 Card
+                        Rectangle {
+                            background: Theme.bg-card;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border-color;
+
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 8px;
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        alignment: start;
+                                        Rectangle {
+                                            width: 22px;
+                                            height: 22px;
+                                            border-radius: 11px;
+                                            background: Theme.accent;
+                                            Text { text: "4"; font-size: 11px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                        }
+                                        Text { text: "Crear ID de Cliente OAuth (App de escritorio)"; font-size: 13px; font-weight: 700; color: Theme.text-main; vertical-alignment: center; }
+                                    }
+                                    Text { text: "Paso 4"; font-size: 11px; color: Theme.text-secondary; vertical-alignment: center; }
+                                }
+
+                                Text {
+                                    text: "Andá a 'Credenciales' > 'Crear credenciales' > 'ID de cliente de OAuth'. En Tipo de aplicación, seleccioná 'App de escritorio' (Desktop application). Hacé clic en 'Crear'.";
+                                    font-size: 12px;
+                                    color: Theme.text-main;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        // Paso 5 Card
+                        Rectangle {
+                            background: Theme.bg-card;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: #10b9814d;
+
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 8px;
+
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        alignment: start;
+                                        Rectangle {
+                                            width: 22px;
+                                            height: 22px;
+                                            border-radius: 11px;
+                                            background: Theme.success;
+                                            Text { text: "5"; font-size: 11px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                        }
+                                        Text { text: "Descargar JSON e Importar en gdsync"; font-size: 13px; font-weight: 700; color: Theme.text-main; vertical-alignment: center; }
+                                    }
+                                    Text { text: "Paso 5 • Final"; font-size: 11px; font-weight: 600; color: Theme.success; vertical-alignment: center; }
+                                }
+
+                                Text {
+                                    text: "En la lista de credenciales, hacé clic en la flecha de descarga ⬇ para bajar el archivo JSON (client_secret_*.json). En gdsync, andá a Cuenta y hacé clic en 'Examinar archivo JSON...' para cargarlo automáticamente.";
+                                    font-size: 12px;
+                                    color: Theme.text-main;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Modal Footer
+            HorizontalLayout {
+                alignment: space-between;
+
+                // External Link Button
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: touch_console.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                    border-width: 1px;
+                    border-color: touch_console.has-hover ? #ffffff2e : Theme.border-color;
+                    height: 34px;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 8px;
+                        alignment: center;
+
+                        Text { text: "🌐"; font-size: 13px; vertical-alignment: center; }
+                        Text {
+                            text: "Abrir Google Cloud Console";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: touch_console.has-hover ? Theme.text-main : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    touch_console := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.open-console-link(); }
+                    }
+                }
+
+                // Navigation Controls
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: end;
+
+                    // Guided: Previous Step Button
+                    if !root.view-all && root.current-step > 0: Rectangle {
+                        border-radius: Theme.radius-sm;
+                        background: touch_prev.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                        border-width: 1px;
+                        border-color: touch_prev.has-hover ? #ffffff2e : Theme.border-color;
+                        height: 34px;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            alignment: center;
+                            Text {
+                                text: "← Anterior";
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: Theme.text-main;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        touch_prev := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                if root.current-step > 0 {
+                                    root.current-step -= 1;
+                                }
+                            }
+                        }
+                    }
+
+                    // Guided: Next Step Button
+                    if !root.view-all && root.current-step < 4: Rectangle {
+                        border-radius: Theme.radius-sm;
+                        background: touch_next.has-hover ? Theme.accent-hover : Theme.accent;
+                        height: 34px;
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            alignment: center;
+                            Text {
+                                text: "Siguiente →";
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: white;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        touch_next := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                if root.current-step < 4 {
+                                    root.current-step += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    // Guided: Final Step (Finish Button)
+                    if !root.view-all && root.current-step == 4: Rectangle {
+                        border-radius: Theme.radius-sm;
+                        background: touch_finish.has-hover ? #059669 : Theme.success;
+                        height: 34px;
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text { text: "✓"; font-size: 13px; font-weight: 700; color: white; vertical-alignment: center; }
+                            Text {
+                                text: "¡Entendido y Listo!";
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: white;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        touch_finish := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.close(); }
+                        }
+                    }
+
+                    // Full List Mode: Simple Close Button
+                    if root.view-all: Rectangle {
+                        border-radius: Theme.radius-sm;
+                        background: touch_all_ok.has-hover ? Theme.accent-hover : Theme.accent;
+                        height: 34px;
+
+                        HorizontalLayout {
+                            padding-left: 18px;
+                            padding-right: 18px;
+                            alignment: center;
+                            Text {
+                                text: "Entendido";
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: white;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        touch_all_ok := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.close(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

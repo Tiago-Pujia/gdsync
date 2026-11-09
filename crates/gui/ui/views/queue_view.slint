@@ -1,0 +1,310 @@
+import { Theme } from "../theme.slint";
+import { Badge } from "../components/badge.slint";
+import { QueueEntry } from "../models.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export component QueueView inherits VerticalLayout {
+    in property <[QueueEntry]> queue-items: [];
+    in property <string> summary-text: "Cola vacía. No hay tareas pendientes.";
+    in property <int> failed-count: 0;
+
+    callback retry-all-failed();
+    callback refresh-queue();
+    callback retry-item(int);
+    callback discard-item(int);
+    callback show-error-detail(int);
+
+    spacing: 16px;
+    padding: 24px;
+
+    // View Header
+    HorizontalLayout {
+        alignment: space-between;
+        VerticalLayout {
+            spacing: 4px;
+            Text {
+                text: "Cola de Sincronización";
+                font-size: 20px;
+                font-weight: 700;
+                color: Theme.text-main;
+            }
+            Text {
+                text: "Archivos creados o modificados localmente subiéndose a Google Drive.";
+                font-size: 13px;
+                color: Theme.text-secondary;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+
+            if root.failed-count > 0 : Rectangle {
+                border-radius: Theme.radius-sm;
+                background: touch_retry_all.has-hover ? Theme.danger.transparentize(0.7) : Theme.danger.transparentize(0.85);
+                border-width: 1px;
+                border-color: Theme.danger;
+                height: 32px;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 6px;
+                    Text { text: "🔄"; font-size: 12px; vertical-alignment: center; }
+                    Text {
+                        text: "Reintentar fallidas (\{root.failed-count})";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Theme.danger;
+                        vertical-alignment: center;
+                    }
+                }
+                touch_retry_all := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.retry-all-failed(); }
+                }
+            }
+
+            Rectangle {
+                border-radius: Theme.radius-sm;
+                background: touch_refresh.has-hover ? Theme.accent-hover : Theme.accent;
+                height: 32px;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 6px;
+                    Text { text: "🔄"; font-size: 12px; vertical-alignment: center; }
+                    Text { text: "Actualizar"; font-size: 12px; font-weight: 600; color: white; vertical-alignment: center; }
+                }
+                touch_refresh := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.refresh-queue(); }
+                }
+            }
+        }
+    }
+
+    // Summary notice
+    Rectangle {
+        background: Theme.bg-card;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        height: 36px;
+
+        HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 14px;
+            alignment: space-between;
+            Text {
+                text: root.summary-text;
+                font-size: 12px;
+                font-weight: 500;
+                color: root.failed-count > 0 ? Theme.warning : Theme.text-secondary;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    // Table Container
+    Rectangle {
+        background: Theme.bg-card;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        clip: true;
+
+        VerticalLayout {
+            // Header
+            Rectangle {
+                height: 36px;
+                background: Theme.bg-surface;
+                border-width: 1px;
+                border-color: Theme.border-color;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    alignment: space-between;
+
+                    Text { width: 50px; text: "ID"; font-size: 11px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center; }
+                    Text { width: 90px; text: "OPERACIÓN"; font-size: 11px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center; }
+                    Text { width: 240px; text: "ELEMENTO"; font-size: 11px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center; }
+                    Text { width: 80px; text: "TAMAÑO"; font-size: 11px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center; }
+                    Text { width: 110px; text: "ESTADO"; font-size: 11px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center; }
+                    Text { width: 60px; text: "INTENTOS"; font-size: 11px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center; }
+                    Text { width: 100px; text: "ACCIONES"; font-size: 11px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center; horizontal-alignment: right; }
+                }
+            }
+
+            // Scrollable Queue Rows
+            ScrollView {
+                VerticalLayout {
+                    for item in root.queue-items : Rectangle {
+                        height: 44px;
+                        background: row_touch.has-hover ? Theme.bg-surface-hover : Colors.transparent;
+
+                        row_touch := TouchArea {}
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            alignment: space-between;
+
+                            // ID
+                            Text {
+                                width: 50px;
+                                text: "\{item.id}";
+                                font-size: 12px;
+                                color: Theme.text-muted;
+                                vertical-alignment: center;
+                            }
+
+                            // OP Badge
+                            HorizontalLayout {
+                                width: 90px;
+                                alignment: start;
+                                y: (parent.height - 22px) / 2;
+                                if item.op == "create" || item.op == "update" : Badge {
+                                    text: "SUBIR";
+                                    badge-color: Theme.accent;
+                                    badge-bg: Theme.accent.transparentize(0.85);
+                                }
+                                if item.op == "trash" : Badge {
+                                    text: "PAPELERA";
+                                    badge-color: Theme.danger;
+                                    badge-bg: Theme.danger.transparentize(0.85);
+                                }
+                                if item.op == "mkdir" : Badge {
+                                    text: "CARPETA";
+                                    badge-color: Theme.text-secondary;
+                                    badge-bg: Theme.bg-surface;
+                                }
+                            }
+
+                            // Display Name
+                            Text {
+                                width: 240px;
+                                text: item.display-name;
+                                font-size: 13px;
+                                font-weight: 500;
+                                color: Theme.text-main;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            // Size
+                            Text {
+                                width: 80px;
+                                text: item.size-str;
+                                font-size: 12px;
+                                color: Theme.text-secondary;
+                                vertical-alignment: center;
+                            }
+
+                            // Status Badge
+                            HorizontalLayout {
+                                width: 110px;
+                                alignment: start;
+                                y: (parent.height - 22px) / 2;
+                                if item.is-failed : Badge {
+                                    text: "⚠️ Fallido";
+                                    badge-color: Theme.danger;
+                                    badge-bg: Theme.danger.transparentize(0.85);
+                                }
+                                if !item.is-failed : Badge {
+                                    text: "⏳ Pendiente";
+                                    badge-color: Theme.warning;
+                                    badge-bg: Theme.warning.transparentize(0.85);
+                                }
+                            }
+
+                            // Attempts
+                            Text {
+                                width: 60px;
+                                text: "\{item.attempts}";
+                                font-size: 12px;
+                                color: Theme.text-secondary;
+                                vertical-alignment: center;
+                            }
+
+                            // Actions
+                            HorizontalLayout {
+                                width: 100px;
+                                spacing: 6px;
+                                alignment: end;
+
+                                if item.is-failed : Rectangle {
+                                    border-radius: Theme.radius-sm;
+                                    background: touch_retry.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                                    border-width: 1px;
+                                    border-color: touch_retry.has-hover ? #ffffff2e : Theme.border-color;
+                                    height: 24px;
+                                    y: (parent.height - self.height) / 2;
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        alignment: center;
+                                        Text {
+                                            text: "Reintentar";
+                                            font-size: 11px;
+                                            color: touch_retry.has-hover ? Theme.text-main : Theme.text-secondary;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    touch_retry := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.retry-item(item.id); }
+                                    }
+                                }
+
+                                if item.is-failed : Rectangle {
+                                    width: 24px;
+                                    height: 24px;
+                                    border-radius: Theme.radius-sm;
+                                    background: touch_err.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                                    border-width: 1px;
+                                    border-color: touch_err.has-hover ? #ffffff2e : Theme.border-color;
+                                    y: (parent.height - self.height) / 2;
+                                    Text { text: "ℹ️"; font-size: 11px; vertical-alignment: center; horizontal-alignment: center; }
+                                    touch_err := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.show-error-detail(item.id); }
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 24px;
+                                    height: 24px;
+                                    border-radius: Theme.radius-sm;
+                                    background: touch_discard.has-hover ? Theme.danger.transparentize(0.7) : Theme.danger.transparentize(0.88);
+                                    y: (parent.height - self.height) / 2;
+                                    Text { text: "🗑️"; font-size: 11px; vertical-alignment: center; horizontal-alignment: center; }
+                                    touch_discard := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.discard-item(item.id); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.queue-items.length == 0 : VerticalLayout {
+                        alignment: center;
+                        height: 220px;
+                        spacing: 8px;
+                        Text {
+                            text: "📤";
+                            font-size: 32px;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: "Cola vacía. No hay archivos pendientes de subida.";
+                            font-size: 13px;
+                            color: Theme.text-muted;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

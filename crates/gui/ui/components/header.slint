@@ -1,0 +1,223 @@
+import { Theme } from "../theme.slint";
+
+export component Header inherits Rectangle {
+    in property <bool> daemon-running: true;
+    in property <bool> account-connected: false;
+    in property <string> account-label: "No conectado";
+
+    callback toggle-daemon();
+    callback open-dolphin();
+    callback sync-now();
+    callback toggle-theme();
+    callback show-account();
+
+    height: 52px;
+    background: Theme.bg-sidebar;
+    border-width: 1px;
+    border-color: Theme.border-color;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+        alignment: space-between;
+
+        // Brand section
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                border-radius: 8px;
+                background: #4285F4;
+                y: (parent.height - self.height) / 2;
+                Text {
+                    text: "☁";
+                    color: white;
+                    font-size: 15px;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+            Text {
+                text: "gdsync";
+                font-size: 15px;
+                font-weight: 700;
+                color: Theme.text-main;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                border-radius: 4px;
+                background: Theme.accent.transparentize(0.85);
+                height: 20px;
+                y: (parent.height - self.height) / 2;
+                HorizontalLayout {
+                    padding-left: 6px;
+                    padding-right: 6px;
+                    alignment: center;
+                    Text {
+                        text: "Rust / Slint";
+                        font-size: 11px;
+                        font-weight: 600;
+                        color: Theme.accent;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // Status pills in center
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: center;
+
+            // Daemon status pill
+            Rectangle {
+                border-radius: 14px;
+                background: touch_daemon.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                border-width: 1px;
+                border-color: touch_daemon.has-hover ? #ffffff2e : Theme.border-color;
+                height: 28px;
+                y: (parent.height - self.height) / 2;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 6px;
+                    alignment: center;
+                    Rectangle {
+                        width: 7px;
+                        height: 7px;
+                        border-radius: 3.5px;
+                        background: root.daemon-running ? Theme.success : Theme.text-muted;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: root.daemon-running ? "Servicio Activo" : "Servicio Detenido";
+                        font-size: 12px;
+                        font-weight: 500;
+                        color: Theme.text-main;
+                        vertical-alignment: center;
+                    }
+                }
+
+                touch_daemon := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.toggle-daemon(); }
+                }
+            }
+
+            // Account status pill
+            Rectangle {
+                border-radius: 14px;
+                background: touch_acct.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                border-width: 1px;
+                border-color: touch_acct.has-hover ? #ffffff2e : Theme.border-color;
+                height: 28px;
+                y: (parent.height - self.height) / 2;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 6px;
+                    alignment: center;
+                    Rectangle {
+                        width: 7px;
+                        height: 7px;
+                        border-radius: 3.5px;
+                        background: root.account-connected ? Theme.accent : Theme.danger;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: root.account-label;
+                        font-size: 12px;
+                        font-weight: 500;
+                        color: Theme.text-main;
+                        vertical-alignment: center;
+                    }
+                }
+
+                touch_acct := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.show-account(); }
+                }
+            }
+        }
+
+        // Action buttons
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+
+            // Dolphin button
+            Rectangle {
+                border-radius: Theme.radius-sm;
+                background: touch_dolphin.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                border-width: 1px;
+                border-color: touch_dolphin.has-hover ? #ffffff2e : Theme.border-color;
+                height: 30px;
+                y: (parent.height - self.height) / 2;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 6px;
+                    alignment: center;
+                    Text { text: "📂"; font-size: 12px; vertical-alignment: center; }
+                    Text {
+                        text: "Dolphin";
+                        font-size: 12px;
+                        font-weight: 500;
+                        color: touch_dolphin.has-hover ? Theme.text-main : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                }
+                touch_dolphin := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.open-dolphin(); }
+                }
+            }
+
+            // Sync button
+            Rectangle {
+                border-radius: Theme.radius-sm;
+                background: touch_sync.has-hover ? Theme.accent-hover : Theme.accent;
+                height: 30px;
+                y: (parent.height - self.height) / 2;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 6px;
+                    alignment: center;
+                    Text { text: "🔄"; font-size: 12px; vertical-alignment: center; }
+                    Text { text: "Sincronizar"; font-size: 12px; font-weight: 600; color: white; vertical-alignment: center; }
+                }
+                touch_sync := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.sync-now(); }
+                }
+            }
+
+            // Theme toggle button
+            Rectangle {
+                width: 30px;
+                height: 30px;
+                border-radius: Theme.radius-sm;
+                background: touch_theme.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                border-width: 1px;
+                border-color: touch_theme.has-hover ? #ffffff2e : Theme.border-color;
+                y: (parent.height - self.height) / 2;
+                Text {
+                    text: Theme.is-dark ? "☀️" : "🌙";
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+                touch_theme := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.toggle-theme(); }
+                }
+            }
+        }
+    }
+}

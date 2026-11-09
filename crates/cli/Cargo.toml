@@ -7,4 +7,5 @@ edition.workspace = true
 gdsync-core.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+dirs.workspace = true
 tokio.workspace = true

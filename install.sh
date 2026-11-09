@@ -3,26 +3,58 @@ set -e
 
 # Script de instalación de gdsync para Linux (KDE Plasma / GNOME / etc.)
 
-PREFIX="${PREFIX:-$HOME/.local}"
+# Detect real user if invoked via sudo
+if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+    REAL_USER="$SUDO_USER"
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+else
+    REAL_USER="$USER"
+    REAL_HOME="$HOME"
+fi
+
+# Ensure Cargo is on PATH even when invoked with sudo
+if ! command -v cargo >/dev/null 2>&1; then
+    if [ -x "$REAL_HOME/.cargo/bin/cargo" ]; then
+        export PATH="$REAL_HOME/.cargo/bin:$PATH"
+    elif [ -x "$HOME/.cargo/bin/cargo" ]; then
+        export PATH="$HOME/.cargo/bin:$PATH"
+    fi
+fi
+
+if [ -z "$PREFIX" ]; then
+    if [ "$EUID" -eq 0 ]; then
+        PREFIX="/usr/local"
+    else
+        PREFIX="$HOME/.local"
+    fi
+fi
+
 BIN_DIR="$PREFIX/bin"
 SHARE_DIR="$PREFIX/share"
 APPLICATIONS_DIR="$SHARE_DIR/applications"
 SERVICEMENUS_DIR="$SHARE_DIR/kio/servicemenus"
-SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+SYSTEMD_USER_DIR="$REAL_HOME/.config/systemd/user"
 GDSYNC_DATA_DIR="$SHARE_DIR/gdsync"
 
 echo "=== Instalando gdsync ==="
+echo "Usuario destino: $REAL_USER"
 echo "Destino de binarios: $BIN_DIR"
 
 # 1. Determinar fuente de binarios (paquete precompilado o compilación local con Cargo)
-if [ -f "bin/gdsync" ] && [ -f "bin/gdsyncd" ]; then
+if [ -f "bin/gdsync" ] && [ -f "bin/gdsyncd" ] && [ -f "bin/gdsync-gui" ]; then
     SRC_GDSYNC="bin/gdsync"
     SRC_GDSYNCD="bin/gdsyncd"
+    SRC_GDSYNC_GUI="bin/gdsync-gui"
 else
-    echo "Compilando binarios con Cargo..."
-    cargo build --workspace --release
+    echo "Compilando binarios con Cargo (workspace completo)..."
+    if [ "$EUID" -eq 0 ] && [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+        sudo -u "$SUDO_USER" PATH="$PATH" cargo build --workspace --release
+    else
+        cargo build --workspace --release
+    fi
     SRC_GDSYNC="target/release/gdsync"
     SRC_GDSYNCD="target/release/gdsyncd"
+    SRC_GDSYNC_GUI="target/release/gdsync-gui"
 fi
 
 # 2. Crear carpetas de destino
@@ -30,45 +62,14 @@ mkdir -p "$BIN_DIR"
 mkdir -p "$APPLICATIONS_DIR"
 mkdir -p "$SERVICEMENUS_DIR"
 mkdir -p "$SYSTEMD_USER_DIR"
-mkdir -p "$GDSYNC_DATA_DIR/gui"
+mkdir -p "$GDSYNC_DATA_DIR"
 
-# 3. Instalar binarios
-echo "Instalando binarios en $BIN_DIR..."
-cp --remove-destination "$SRC_GDSYNC" "$BIN_DIR/gdsync-bin"
+# 3. Instalar binarios nativos en Rust
+echo "Instalando binarios nativos en $BIN_DIR..."
+cp --remove-destination "$SRC_GDSYNC" "$BIN_DIR/gdsync"
 cp --remove-destination "$SRC_GDSYNCD" "$BIN_DIR/gdsyncd"
-chmod +x "$BIN_DIR/gdsync-bin" "$BIN_DIR/gdsyncd"
-
-# 4. Instalar acciones, GUI y crear wrappers ejecutables
-echo "Instalando interfaz gráfica y acciones auxiliares..."
-cp --remove-destination src/actions.py "$GDSYNC_DATA_DIR/actions.py"
-chmod +x "$GDSYNC_DATA_DIR/actions.py"
-cp --remove-destination src/gui/main.py "$GDSYNC_DATA_DIR/gui/main.py"
-chmod +x "$GDSYNC_DATA_DIR/gui/main.py"
-
-cat << EOF > "$BIN_DIR/gdsync"
-#!/bin/sh
-GDSYNC_DATA="\${XDG_DATA_HOME:-$SHARE_DIR}/gdsync"
-
-if [ "\$1" = "gui" ]; then
-    shift
-    exec python3 "\$GDSYNC_DATA/gui/main.py" "\$@"
-fi
-
-if [ "\$1" = "pin" ] || [ "\$1" = "unpin" ] || [ "\$1" = "pinned" ] || [ "\$1" = "offline" ] || [ "\$1" = "copy-link" ] || [ "\$1" = "open-web" ]; then
-    if [ -f "\$GDSYNC_DATA/actions.py" ]; then
-        exec python3 "\$GDSYNC_DATA/actions.py" "\$@"
-    fi
-fi
-
-exec "$BIN_DIR/gdsync-bin" "\$@"
-EOF
-chmod +x "$BIN_DIR/gdsync"
-
-cat << EOF > "$BIN_DIR/gdsync-gui"
-#!/bin/sh
-exec python3 "\${XDG_DATA_HOME:-$SHARE_DIR}/gdsync/gui/main.py" "\$@"
-EOF
-chmod +x "$BIN_DIR/gdsync-gui"
+cp --remove-destination "$SRC_GDSYNC_GUI" "$BIN_DIR/gdsync-gui"
+chmod +x "$BIN_DIR/gdsync" "$BIN_DIR/gdsyncd" "$BIN_DIR/gdsync-gui"
 
 # 5. Instalar iconos de la aplicación
 echo "Instalando iconografía de gdsync..."
@@ -96,6 +97,9 @@ chmod +x "$APPLICATIONS_DIR/gdsync.desktop"
 # 8. Instalar servicio systemd de usuario
 echo "Instalando servicio systemd de usuario..."
 sed "s|^ExecStart=.*|ExecStart=$BIN_DIR/gdsyncd|g" packaging/systemd/gdsyncd.service > "$SYSTEMD_USER_DIR/gdsyncd.service"
+if [ "$EUID" -eq 0 ] && [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+    chown "$REAL_USER:$REAL_USER" "$SYSTEMD_USER_DIR/gdsyncd.service"
+fi
 
 # 9. Refrescar cachés de KDE / XDG si las utilidades existen
 if command -v kbuildsycoca6 >/dev/null 2>&1; then

@@ -52,26 +52,38 @@ enum Cmd {
         #[command(subcommand)]
         sub: Option<ConfigCmd>,
     },
-    /// Marca un archivo o carpeta como "Disponible sin conexión" (no se borra de la caché).
+    /// Marca un archivo o carpeta como "Disponible sin conexión" (o lista elementos anclados).
     Pin {
-        /// Ruta al archivo o carpeta
-        path: PathBuf,
+        /// Lista los elementos disponibles sin conexión
+        #[arg(short = 'l', long = "list")]
+        list: bool,
+        /// Ruta(s) al archivo o carpeta
+        #[arg(value_name = "PATH")]
+        paths: Vec<PathBuf>,
     },
     /// Desmarca un archivo o carpeta de "Disponible sin conexión" (liberable de la caché).
     Unpin {
-        /// Ruta al archivo o carpeta
-        path: PathBuf,
+        /// Ruta(s) al archivo o carpeta
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
     },
     /// Abre el archivo o carpeta seleccionado en la versión web de Google Drive.
+    #[command(name = "open-web", alias = "openweb")]
     OpenWeb {
-        /// Ruta al archivo o carpeta
-        path: PathBuf,
+        /// Ruta(s) al archivo o carpeta
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
     },
     /// Copia el enlace web de Google Drive al portapapeles.
+    #[command(name = "copy-link", alias = "copylink")]
     CopyLink {
-        /// Ruta al archivo o carpeta
-        path: PathBuf,
+        /// Ruta(s) al archivo o carpeta
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
     },
+    /// Lista las carpetas padre y archivos sueltos disponibles sin conexión.
+    #[command(visible_alias = "offline")]
+    Pinned,
     /// Abre la interfaz gráfica de usuario (GUI).
     Gui {
         /// Inicia minimizado en la bandeja del sistema
@@ -518,92 +530,162 @@ async fn main() -> Result<()> {
             }
         }
 
-        Cmd::Pin { path } => {
-            let cfg = Config::load()?;
+        Cmd::Pinned => {
             let db = Db::open(&db_path())?;
-            let item = resolve_item_from_input_path(&cfg, &db, &path)?;
-            db.set_pinned(&item.id, true)?;
-            println!("✓ '{}' marcado como disponible sin conexión.", item.name);
-            if !item.is_dir() && !item.is_google_doc() {
-                let drive = Arc::new(Drive::new(cfg.clone())?);
-                let db_arc = Arc::new(Db::open(&db_path())?);
-                let cache = Cache::new(
-                    cache_dir().join("blobs"),
-                    db_arc,
-                    drive,
-                    cfg.cache_max_gb * 1024 * 1024 * 1024,
-                )?;
-                println!("  Descargando copia local a la caché...");
-                let _ = cache.ensure(&item).await?;
-                println!("  Descarga completada con éxito.");
+            print_pinned_list(&db)?;
+        }
+
+        Cmd::Pin { list, paths } => {
+            let db = Db::open(&db_path())?;
+            if list || paths.is_empty() {
+                print_pinned_list(&db)?;
+                return Ok(());
+            }
+
+            let cfg = Config::load()?;
+            let drive = Arc::new(Drive::new(cfg.clone())?);
+            let db_arc = Arc::new(Db::open(&db_path())?);
+            let cache = Cache::new(
+                cache_dir().join("blobs"),
+                db_arc,
+                drive,
+                cfg.cache_max_gb * 1024 * 1024 * 1024,
+            )?;
+
+            for path in paths {
+                let item = match resolve_item_from_input_path(&cfg, &db, &path) {
+                    Ok(it) => it,
+                    Err(e) => {
+                        eprintln!("! {e}");
+                        notify_desktop("Google Drive", &format!("No se encontró '{}' en Google Drive local.", path.display()), "dialog-warning");
+                        continue;
+                    }
+                };
+
+                if item.is_dir() {
+                    notify_desktop("Google Drive", &format!("Sincronizando carpeta '{}' para uso sin conexión...", item.name), "folder-gdrive");
+                    println!("Marcando carpeta '{}' y sus contenidos como disponible sin conexión...", item.name);
+                    let targets = db.set_pinned_recursive(&item.id, true)?;
+                    let total = targets.len();
+                    for child in &targets {
+                        println!("  Descargando: {}...", child.name);
+                        let _ = cache.ensure(child).await;
+                    }
+                    notify_desktop(
+                        "Google Drive",
+                        &format!("✓ '{}' ({} archivo{}) ya disponible sin conexión.", item.name, total, if total != 1 { "s" } else { "" }),
+                        "emblem-checked",
+                    );
+                    println!("✓ Carpeta '{}' ({total} archivos) completada.", item.name);
+                } else {
+                    notify_desktop("Google Drive", &format!("Descargando '{}' para uso sin conexión...", item.name), "folder-gdrive");
+                    println!("Descargando '{}' a la caché local...", item.name);
+                    db.set_pinned(&item.id, true)?;
+                    if !item.is_google_doc() {
+                        let _ = cache.ensure(&item).await?;
+                    }
+                    notify_desktop("Google Drive", &format!("✓ '{}' disponible sin conexión.", item.name), "emblem-checked");
+                    println!("✓ '{}' marcado como disponible sin conexión.", item.name);
+                }
             }
         }
 
-        Cmd::Unpin { path } => {
+        Cmd::Unpin { paths } => {
             let cfg = Config::load()?;
             let db = Db::open(&db_path())?;
-            let item = resolve_item_from_input_path(&cfg, &db, &path)?;
-            db.set_pinned(&item.id, false)?;
-            println!("✓ '{}' desmarcado de disponible sin conexión (espacio local liberable).", item.name);
+            for path in paths {
+                let item = match resolve_item_from_input_path(&cfg, &db, &path) {
+                    Ok(it) => it,
+                    Err(e) => {
+                        eprintln!("! {e}");
+                        continue;
+                    }
+                };
+
+                if item.is_dir() {
+                    db.set_pinned_recursive(&item.id, false)?;
+                    notify_desktop("Google Drive", &format!("☁ Espacio local liberado para '{}' y sus carpetas.", item.name), "folder-cloud");
+                    println!("✓ '{}' desmarcado (espacio local liberable).", item.name);
+                } else {
+                    db.set_pinned(&item.id, false)?;
+                    notify_desktop("Google Drive", &format!("☁ Espacio local liberado para '{}'.", item.name), "folder-cloud");
+                    println!("✓ '{}' desmarcado de disponible sin conexión.", item.name);
+                }
+            }
         }
 
-        Cmd::OpenWeb { path } => {
+        Cmd::OpenWeb { paths } => {
             let cfg = Config::load()?;
             let db = Db::open(&db_path())?;
-            let item = resolve_item_from_input_path(&cfg, &db, &path)?;
-            let url = item.web_link.unwrap_or_else(|| format!("https://drive.google.com/open?id={}", item.id));
-            println!("Abriendo en el navegador: {url}");
-            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+            for path in paths {
+                let item = match resolve_item_from_input_path(&cfg, &db, &path) {
+                    Ok(it) => it,
+                    Err(e) => {
+                        eprintln!("! {e}");
+                        continue;
+                    }
+                };
+                let url = if item.is_shortcut() && item.web_link.as_deref().map(|l| l.contains("/file/d/")).unwrap_or(false) {
+                    format!("https://drive.google.com/open?id={}", item.id)
+                } else {
+                    item.web_link.unwrap_or_else(|| format!("https://drive.google.com/open?id={}", item.id))
+                };
+                println!("Abriendo en el navegador: {url}");
+                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+            }
         }
 
-        Cmd::CopyLink { path } => {
+        Cmd::CopyLink { paths } => {
             let cfg = Config::load()?;
             let db = Db::open(&db_path())?;
-            let item = resolve_item_from_input_path(&cfg, &db, &path)?;
-            let url = item.web_link.unwrap_or_else(|| format!("https://drive.google.com/open?id={}", item.id));
-            println!("{url}");
-            if copy_to_clipboard(&url) {
-                notify_desktop("Google Drive", &format!("Enlace copiado al portapapeles:\n{}", item.name), "edit-copy");
-            } else {
-                notify_desktop("Google Drive", &format!("No se pudo copiar al portapapeles:\n{url}"), "dialog-warning");
+            for path in paths {
+                let item = match resolve_item_from_input_path(&cfg, &db, &path) {
+                    Ok(it) => it,
+                    Err(e) => {
+                        eprintln!("! {e}");
+                        continue;
+                    }
+                };
+                let url = if item.is_shortcut() && item.web_link.as_deref().map(|l| l.contains("/file/d/")).unwrap_or(false) {
+                    format!("https://drive.google.com/open?id={}", item.id)
+                } else {
+                    item.web_link.unwrap_or_else(|| format!("https://drive.google.com/open?id={}", item.id))
+                };
+                println!("{url}");
+                if copy_to_clipboard(&url) {
+                    notify_desktop("Google Drive", &format!("Enlace copiado al portapapeles:\n{}", item.name), "edit-copy");
+                } else {
+                    notify_desktop("Google Drive", &format!("No se pudo copiar al portapapeles:\n{url}"), "dialog-warning");
+                }
             }
         }
 
         Cmd::Gui { minimized, tray, args } => {
             let mut candidates = vec![
-                gdsync_core::config::data_dir().join("gui/main.py"),
-                PathBuf::from("/usr/local/share/gdsync/gui/main.py"),
-                PathBuf::from("/usr/share/gdsync/gui/main.py"),
+                PathBuf::from("target/release/gdsync-gui"),
+                PathBuf::from("target/debug/gdsync-gui"),
+                dirs::home_dir().map(|h| h.join(".local/bin/gdsync-gui")).unwrap_or_default(),
+                PathBuf::from("/usr/local/bin/gdsync-gui"),
+                PathBuf::from("/usr/bin/gdsync-gui"),
             ];
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(parent) = exe.parent() {
-                    candidates.push(parent.join("../share/gdsync/gui/main.py"));
-                    candidates.push(parent.join("../../src/gui/main.py"));
-                    candidates.push(parent.join("../src/gui/main.py"));
-                    candidates.push(parent.join("src/gui/main.py"));
-                    candidates.push(parent.join("gui/main.py"));
+                    candidates.insert(0, parent.join("gdsync-gui"));
                 }
             }
-            candidates.push(PathBuf::from("src/gui/main.py"));
 
-            let script = candidates.into_iter().find(|p| p.exists());
-            if let Some(path) = script {
-                let mut cmd = std::process::Command::new("python3");
-                cmd.arg(&path);
-                if minimized {
-                    cmd.arg("--minimized");
-                }
-                if tray {
-                    cmd.arg("--tray");
-                }
-                cmd.args(args);
-                let mut child = cmd
-                    .spawn()
-                    .with_context(|| format!("falló al iniciar python3 {}", path.display()))?;
-                let _ = child.wait();
-            } else {
-                bail!("no se encontró el script de la interfaz gráfica. Podés ejecutarlo con: python3 src/gui/main.py");
+            let bin = candidates.into_iter().find(|p| p.is_file());
+            let exe_path = bin.unwrap_or_else(|| PathBuf::from("gdsync-gui"));
+            let mut cmd = std::process::Command::new(exe_path);
+            if minimized {
+                cmd.arg("--minimized");
             }
+            if tray {
+                cmd.arg("--tray");
+            }
+            cmd.args(args);
+            let mut child = cmd.spawn().with_context(|| "falló al iniciar gdsync-gui")?;
+            let _ = child.wait();
         }
 
         Cmd::Logout => {
@@ -829,4 +911,107 @@ fn resolve_item_from_input_path(cfg: &Config, db: &Db, raw_path: &Path) -> Resul
     };
     db.resolve_relative_path(rel)?
         .with_context(|| format!("no se encontró '{}' en Google Drive local", raw_path.display()))
+}
+
+fn format_size(bytes: u64) -> String {
+    let mut val = bytes as f64;
+    for unit in ["B", "KB", "MB", "GB", "TB"] {
+        if val < 1024.0 {
+            return format!("{:.1} {}", val, unit);
+        }
+        val /= 1024.0;
+    }
+    format!("{:.1} PB", val)
+}
+
+fn print_pinned_list(db: &Db) -> Result<()> {
+    let items = db.get_root_pinned_items()?;
+    println!("=== Elementos disponibles sin conexión (anclados) ===");
+    if items.is_empty() {
+        println!("No hay carpetas ni archivos anclados actualmente.\n");
+        println!("Para mantener carpetas o archivos sin conexión, podés:");
+        println!("  - Clic derecho en Dolphin -> 'Mantener siempre en este equipo'");
+        println!("  - Ejecutar: gdsync pin <ruta>");
+        return Ok(());
+    }
+
+    let folders_count = items.iter().filter(|it| it.is_folder).count();
+    let files_count = items.iter().filter(|it| !it.is_folder).count();
+    let total_bytes: u64 = items.iter().map(|it| it.total_size).sum();
+    let total_files: u64 = items.iter().map(|it| it.file_count).sum();
+
+    println!(
+        "Resumen: {} carpeta(s) padre, {} archivo(s) suelto(s) ({} archivos totales, {})\n",
+        folders_count,
+        files_count,
+        total_files,
+        format_size(total_bytes)
+    );
+
+    let header = format!(
+        "{:<10} {:<42} {:<12} {:<12} {}",
+        "TIPO", "UBICACIÓN / NOMBRE", "ARCHIVOS", "TAMAÑO", "ESTADO EN CACHÉ"
+    );
+    println!("{header}");
+    println!("{}", "-".repeat(header.len().max(80)));
+
+    for it in &items {
+        let tipo = if it.is_folder { "📁 Carpeta" } else { "📄 Archivo" };
+        let mut ruta = it.full_path.clone();
+        if ruta.len() > 40 {
+            ruta = format!("...{}", &ruta[ruta.len() - 37..]);
+        }
+
+        let cnt_str = if it.is_folder {
+            format!("{} arch.", it.file_count)
+        } else {
+            "1 arch.".to_string()
+        };
+
+        let cache_str = if it.is_folder {
+            let pct = if it.file_count > 0 {
+                (it.cached_count as f64 / it.file_count as f64 * 100.0) as u64
+            } else {
+                100
+            };
+            format!("{}/{} en caché ({}%)", it.cached_count, it.file_count, pct)
+        } else if it.cached_count == 1 {
+            "En caché (100%)".to_string()
+        } else {
+            "Pendiente".to_string()
+        };
+
+        let size_str = format_size(it.total_size);
+        println!("{:<10} {:<42} {:<12} {:<12} {}", tipo, ruta, cnt_str, size_str, cache_str);
+    }
+
+    println!("\nComandos útiles:");
+    println!("  gdsync pin <ruta>      # Mantener carpeta o archivo sin conexión");
+    println!("  gdsync unpin <ruta>    # Liberar espacio local (desanclar)");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(500), "500.0 B");
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MB");
+        assert_eq!(format_size(5 * 1024 * 1024 * 1024), "5.0 GB");
+    }
+
+    #[test]
+    fn test_clean_input_path() {
+        assert_eq!(
+            clean_input_path(Path::new("file:///home/user/GoogleDrive/test%20file.txt")),
+            PathBuf::from("/home/user/GoogleDrive/test file.txt")
+        );
+        assert_eq!(
+            clean_input_path(Path::new("/home/user/GoogleDrive/normal.txt")),
+            PathBuf::from("/home/user/GoogleDrive/normal.txt")
+        );
+    }
 }

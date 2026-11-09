@@ -3,6 +3,7 @@ use crate::drive::{RemoteFile, FOLDER_MIME, GOOGLE_APPS_PREFIX, SHORTCUT_MIME};
 use crate::now;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -89,6 +90,67 @@ pub struct QueueSummary {
     pub trashes: u64,
     pub others: u64,
     pub failed: u64,
+}
+
+pub const DOC_EXTENSIONS: &[&str] = &[
+    ".gdoc.desktop",
+    ".gsheet.desktop",
+    ".gslides.desktop",
+    ".gdraw.desktop",
+    ".gform.desktop",
+    ".gjam.desktop",
+    ".gmap.desktop",
+    ".gsite.desktop",
+    ".glink.desktop",
+    ".desktop",
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinnedRootItem {
+    pub id: String,
+    pub name: String,
+    pub mime: String,
+    pub is_folder: bool,
+    pub full_path: String,
+    pub file_count: u64,
+    pub total_size: u64,
+    pub cached_count: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalFileStatus {
+    Folder,
+    Pinned,
+    Cached,
+    CloudOnly,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExplorerItem {
+    pub id: String,
+    pub name: String,
+    pub rel_path: String,
+    pub parent_location: String,
+    pub size: u64,
+    pub mime: String,
+    pub is_folder: bool,
+    pub pinned: bool,
+    pub is_root_pinned: bool,
+    pub status: LocalFileStatus,
+    pub web_link: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueItemView {
+    pub id: i64,
+    pub op: String,
+    pub file_id: String,
+    pub display_name: String,
+    pub size_bytes: u64,
+    pub status: String,
+    pub attempts: i64,
+    pub created_at: i64,
+    pub last_error: Option<String>,
 }
 
 pub struct Db {
@@ -337,6 +399,265 @@ impl Db {
         Ok(())
     }
 
+    pub fn count_pinned_items(&self) -> Result<u64> {
+        Ok(self.conn().query_row(
+            "SELECT COUNT(*) FROM items WHERE pinned = 1",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64)
+    }
+
+    pub fn get_root_pinned_items(&self) -> Result<Vec<PinnedRootItem>> {
+        let conn = self.conn();
+        let query = format!(
+            "WITH RECURSIVE
+            path_builder(id, name, parent_id, mime, size, full_path) AS (
+                SELECT id, name, parent_id, mime, size, name as full_path
+                FROM items
+                WHERE parent_id = (SELECT id FROM items WHERE ino={ROOT_INO})
+                UNION ALL
+                SELECT i.id, i.name, i.parent_id, i.mime, i.size, pb.full_path || '/' || i.name
+                FROM items i JOIN path_builder pb ON i.parent_id = pb.id
+            ),
+            ancestors(item_id, ancestor_id, ancestor_pinned) AS (
+                SELECT i.id, i.parent_id, p.pinned
+                FROM items i
+                JOIN items p ON i.parent_id = p.id
+                UNION ALL
+                SELECT a.item_id, p.parent_id, p.pinned
+                FROM ancestors a
+                JOIN items p ON a.ancestor_id = p.id
+                WHERE p.parent_id IS NOT NULL
+            )
+            SELECT pb.id, pb.name, pb.mime, pb.size, pb.full_path
+            FROM path_builder pb
+            JOIN items i ON pb.id = i.id
+            WHERE i.pinned = 1
+              AND NOT EXISTS (
+                  SELECT 1 FROM ancestors a
+                  WHERE a.item_id = pb.id AND a.ancestor_pinned = 1
+              )
+            ORDER BY (pb.mime = '{FOLDER_MIME}') DESC, pb.full_path ASC;"
+        );
+
+        let mut stmt = conn.prepare(&query)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)? as u64,
+                    r.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut results = Vec::new();
+        for (fid, name, mime, size, full_path) in rows {
+            let is_folder = mime == FOLDER_MIME;
+            if is_folder {
+                let (file_count, total_size, cached_count): (i64, i64, i64) = conn.query_row(
+                    &format!(
+                        "WITH RECURSIVE sub(id, size, mime) AS (
+                            SELECT id, size, mime FROM items WHERE id = ?1
+                            UNION ALL
+                            SELECT i.id, i.size, i.mime FROM items i JOIN sub s ON i.parent_id = s.id
+                        )
+                        SELECT 
+                            COUNT(CASE WHEN mime != '{FOLDER_MIME}' AND mime NOT LIKE '{GOOGLE_APPS_PREFIX}%' THEN 1 END),
+                            COALESCE(SUM(CASE WHEN mime != '{FOLDER_MIME}' AND mime NOT LIKE '{GOOGLE_APPS_PREFIX}%' THEN size END), 0),
+                            COUNT(CASE WHEN id IN (SELECT id FROM cache) AND mime != '{FOLDER_MIME}' THEN 1 END)
+                        FROM sub;"
+                    ),
+                    [&fid],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?;
+                results.push(PinnedRootItem {
+                    id: fid,
+                    name,
+                    mime,
+                    is_folder: true,
+                    full_path,
+                    file_count: file_count as u64,
+                    total_size: total_size as u64,
+                    cached_count: cached_count as u64,
+                });
+            } else {
+                let is_cached: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM cache WHERE id = ?1)",
+                        [&fid],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(false);
+                results.push(PinnedRootItem {
+                    id: fid,
+                    name,
+                    mime,
+                    is_folder: false,
+                    full_path,
+                    file_count: 1,
+                    total_size: size,
+                    cached_count: if is_cached { 1 } else { 0 },
+                });
+            }
+        }
+        Ok(results)
+    }
+
+    pub fn set_pinned_recursive(&self, id: &str, pinned: bool) -> Result<Vec<Item>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "WITH RECURSIVE subfolder(id) AS (
+                 SELECT id FROM items WHERE id = ?1
+                 UNION ALL
+                 SELECT i.id FROM items i JOIN subfolder s ON i.parent_id = s.id
+             )
+             UPDATE items SET pinned = ?2 WHERE id IN (SELECT id FROM subfolder)",
+            params![id, if pinned { 1 } else { 0 }],
+        )?;
+
+        let mut download_targets = Vec::new();
+        if pinned {
+            let sql = format!(
+                "WITH RECURSIVE subfolder(id) AS (
+                     SELECT id FROM items WHERE id = ?1
+                     UNION ALL
+                     SELECT i.id FROM items i JOIN subfolder s ON i.parent_id = s.id
+                 )
+                 SELECT {COLS} FROM items
+                 WHERE id IN (SELECT id FROM subfolder)
+                   AND mime != '{FOLDER_MIME}'
+                   AND mime NOT LIKE '{GOOGLE_APPS_PREFIX}%'
+                   AND id NOT IN (SELECT id FROM cache)"
+            );
+            let mut stmt = tx.prepare(&sql)?;
+            let items = stmt.query_map([id], row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+            download_targets = items;
+        }
+        tx.commit()?;
+        Ok(download_targets)
+    }
+
+    pub fn list_explorer_items(&self, limit: usize) -> Result<Vec<ExplorerItem>> {
+        let root_pinned_items = self.get_root_pinned_items()?;
+        let root_pinned_ids: HashSet<String> = root_pinned_items.into_iter().map(|it| it.id).collect();
+
+        let conn = self.conn();
+        let mut map_stmt = conn.prepare_cached("SELECT id, parent_id, name FROM items")?;
+        let parent_map: HashMap<String, (Option<String>, String)> = map_stmt
+            .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let mut cache_stmt = conn.prepare_cached("SELECT id FROM cache")?;
+        let cached_set: HashSet<String> = cache_stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let resolve_rel_path = |item_id: &str| -> String {
+            let mut parts = Vec::new();
+            let mut curr = Some(item_id.to_string());
+            let mut visited = HashSet::new();
+            while let Some(id) = curr {
+                if !visited.insert(id.clone()) {
+                    break;
+                }
+                if let Some((pid, name)) = parent_map.get(&id) {
+                    if pid.is_none() {
+                        break;
+                    }
+                    parts.push(name.clone());
+                    curr = pid.clone();
+                } else {
+                    break;
+                }
+            }
+            parts.reverse();
+            parts.join("/")
+        };
+
+        let sql = format!(
+            "SELECT id, name, size, mime, pinned, web_link
+             FROM items
+             WHERE ino != {ROOT_INO}
+             ORDER BY (mime = '{FOLDER_MIME}') DESC, name ASC
+             LIMIT ?1"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map([limit as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)? as u64,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)? != 0,
+                    r.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut items = Vec::with_capacity(rows.len());
+        for (id, name, size, mime, pinned, web_link) in rows {
+            let is_folder = mime == FOLDER_MIME;
+            let rel_path = resolve_rel_path(&id);
+            let parent_location = if let Some(idx) = rel_path.rfind('/') {
+                rel_path[..idx].to_string()
+            } else {
+                "(Raíz)".to_string()
+            };
+            let is_root_pinned = root_pinned_ids.contains(&id);
+            let status = if is_folder {
+                LocalFileStatus::Folder
+            } else if pinned {
+                LocalFileStatus::Pinned
+            } else if cached_set.contains(&id) {
+                LocalFileStatus::Cached
+            } else {
+                LocalFileStatus::CloudOnly
+            };
+            let link = web_link.unwrap_or_else(|| format!("https://drive.google.com/open?id={id}"));
+
+            items.push(ExplorerItem {
+                id,
+                name,
+                rel_path,
+                parent_location,
+                size,
+                mime,
+                is_folder,
+                pinned,
+                is_root_pinned,
+                status,
+                web_link: link,
+            });
+        }
+
+        Ok(items)
+    }
+
+    pub fn list_root_folders(&self) -> Result<Vec<(String, String)>> {
+        let root_id = self.kv_get("root_id")?.unwrap_or_default();
+        let conn = self.conn();
+        let sql = format!(
+            "SELECT id, name FROM items
+             WHERE mime = '{FOLDER_MIME}' AND (
+                parent_id = 'root' OR parent_id = '' OR parent_id IS NULL
+                OR (?1 != '' AND parent_id = ?1)
+             ) AND id != ?1 AND name != 'Mi unidad'
+             ORDER BY name COLLATE NOCASE ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![root_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut res = Vec::new();
+        for r in rows {
+            res.push(r?);
+        }
+        Ok(res)
+    }
+
     pub fn lookup_child(&self, parent_id: &str, name: &str) -> Result<Option<Item>> {
         let sql = format!("SELECT {COLS} FROM items WHERE parent_id=?1 AND name=?2");
         Ok(self.conn().query_row(&sql, params![parent_id, name], row).optional()?)
@@ -357,15 +678,54 @@ impl Db {
                 std::path::Component::CurDir => continue,
                 _ => continue,
             };
+            if seg.is_empty() {
+                continue;
+            }
             let children = self.children(&current_id)?;
             let entries = crate::names::local_entries(children);
-            match entries.into_iter().find(|(name, _)| name == &seg) {
-                Some((_, child)) => {
-                    current_id = child.id.clone();
-                    current_item = child;
-                }
-                None => return Ok(None),
+
+            // 1. Exact match on local_entries
+            if let Some((_, child)) = entries.iter().find(|(name, _)| name == &seg) {
+                current_id = child.id.clone();
+                current_item = child.clone();
+                continue;
             }
+
+            // 2. Strip Google Doc extensions
+            let mut matched_child = None;
+            for ext in DOC_EXTENSIONS {
+                if let Some(stripped) = seg.strip_suffix(ext) {
+                    if let Some((_, child)) = entries.iter().find(|(name, _)| name == stripped) {
+                        matched_child = Some(child.clone());
+                        break;
+                    }
+                }
+            }
+            if let Some(child) = matched_child {
+                current_id = child.id.clone();
+                current_item = child;
+                continue;
+            }
+
+            // 3. Sanitized slashes (∕ <-> /)
+            let slash_converted = seg.replace('\u{2215}', "/");
+            if let Some((_, child)) = entries.iter().find(|(name, _)| name == &slash_converted) {
+                current_id = child.id.clone();
+                current_item = child.clone();
+                continue;
+            }
+
+            // 4. Fallback: match item.name directly or sanitized name
+            if let Some((_, child)) = entries.iter().find(|(_, c)| {
+                let s = c.name.replace('/', "\u{2215}");
+                s == seg || format!("{s}.desktop") == seg
+            }) {
+                current_id = child.id.clone();
+                current_item = child.clone();
+                continue;
+            }
+
+            return Ok(None);
         }
         Ok(Some(current_item))
     }
@@ -414,6 +774,64 @@ impl Db {
         let mut stmt = conn.prepare_cached(sql)?;
         let tasks = stmt.query_map([limit as i64], upload_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(tasks)
+    }
+
+    pub fn list_queue_items(&self, limit: usize) -> Result<Vec<QueueItemView>> {
+        let conn = self.conn();
+        let sql = "SELECT q.id, q.op, q.file_id, i.name, q.payload, COALESCE(i.size, 0),
+                          q.status, q.attempts, q.created_at, q.last_error
+                   FROM upload_queue q
+                   LEFT JOIN items i ON q.file_id = i.id
+                   ORDER BY q.id DESC LIMIT ?1";
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt
+            .query_map([limit as i64], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, i64>(5)? as u64,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, i64>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut items = Vec::with_capacity(rows.len());
+        for (id, op, file_id, iname, payload, size, status, attempts, created_at, last_error) in rows {
+            let mut fname = iname;
+            if fname.is_none() {
+                if let Some(ref p_str) = payload {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(p_str) {
+                        if let Some(n) = val.get("name").and_then(|v| v.as_str()) {
+                            fname = Some(n.to_string());
+                        }
+                    }
+                }
+            }
+            let display_name = match fname {
+                Some(name) if name != file_id => format!("{name} ({file_id})"),
+                Some(name) => name,
+                None => file_id.clone(),
+            };
+
+            items.push(QueueItemView {
+                id,
+                op,
+                file_id,
+                display_name,
+                size_bytes: size,
+                status,
+                attempts,
+                created_at,
+                last_error,
+            });
+        }
+        Ok(items)
     }
 
     pub fn update_upload_status(&self, id: i64, status: &str, error: Option<&str>) -> Result<()> {
@@ -848,5 +1266,71 @@ mod tests {
             item.web_link.as_deref(),
             Some("https://drive.google.com/open?id=TARGET_FILE_456")
         );
+    }
+
+    #[test]
+    fn test_pinned_recursive_and_root_items() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_root(&rf("ROOT", "Mi unidad", "", FOLDER_MIME)).unwrap();
+        db.upsert(&rf("f_parent", "ParentFolder", "ROOT", FOLDER_MIME)).unwrap();
+        db.upsert(&rf("f_child", "ChildFolder", "f_parent", FOLDER_MIME)).unwrap();
+        db.upsert(&rf("doc1", "doc1.txt", "f_child", "text/plain")).unwrap();
+        db.upsert(&rf("single", "single.txt", "ROOT", "text/plain")).unwrap();
+
+        assert_eq!(db.count_pinned_items().unwrap(), 0);
+
+        // Pin single file
+        db.set_pinned("single", true).unwrap();
+        assert_eq!(db.count_pinned_items().unwrap(), 1);
+
+        // Pin folder recursively
+        let targets = db.set_pinned_recursive("f_parent", true).unwrap();
+        // Should return doc1 as download target
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "doc1");
+
+        assert_eq!(db.count_pinned_items().unwrap(), 4); // single, f_parent, f_child, doc1
+
+        // Root pinned items should ONLY return f_parent and single (not f_child or doc1)
+        let root_pinned = db.get_root_pinned_items().unwrap();
+        assert_eq!(root_pinned.len(), 2);
+        assert!(root_pinned.iter().any(|it| it.id == "f_parent" && it.is_folder && it.file_count == 1));
+        assert!(root_pinned.iter().any(|it| it.id == "single" && !it.is_folder && it.file_count == 1));
+
+        // Unpin folder recursively
+        let _ = db.set_pinned_recursive("f_parent", false).unwrap();
+        assert_eq!(db.count_pinned_items().unwrap(), 1); // only single remaining
+    }
+
+    #[test]
+    fn test_explorer_and_queue_items() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_root(&rf("ROOT", "Mi unidad", "", FOLDER_MIME)).unwrap();
+        db.upsert(&rf("fold1", "CarpetaA", "ROOT", FOLDER_MIME)).unwrap();
+        db.upsert(&rf("file1", "documento.pdf", "fold1", "application/pdf")).unwrap();
+
+        let explorer_items = db.list_explorer_items(10).unwrap();
+        assert_eq!(explorer_items.len(), 2);
+        let fold_item = explorer_items.iter().find(|it| it.id == "fold1").unwrap();
+        assert_eq!(fold_item.status, LocalFileStatus::Folder);
+        assert_eq!(fold_item.rel_path, "CarpetaA");
+
+        let file_item = explorer_items.iter().find(|it| it.id == "file1").unwrap();
+        assert_eq!(file_item.status, LocalFileStatus::CloudOnly);
+        assert_eq!(file_item.rel_path, "CarpetaA/documento.pdf");
+        assert_eq!(file_item.parent_location, "CarpetaA");
+
+        // Queue items test
+        db.enqueue_upload("file1", "create", Some("{\"name\":\"documento.pdf\"}")).unwrap();
+        let queue_items = db.list_queue_items(10).unwrap();
+        assert_eq!(queue_items.len(), 1);
+        assert_eq!(queue_items[0].file_id, "file1");
+        assert_eq!(queue_items[0].op, "create");
+        assert_eq!(queue_items[0].display_name, "documento.pdf (file1)");
+
+        // Resolve relative path with .gdoc.desktop suffix
+        db.upsert(&rf("gdoc1", "Apuntes", "ROOT", "application/vnd.google-apps.document")).unwrap();
+        let resolved = db.resolve_relative_path(Path::new("Apuntes.gdoc.desktop")).unwrap().unwrap();
+        assert_eq!(resolved.id, "gdoc1");
     }
 }

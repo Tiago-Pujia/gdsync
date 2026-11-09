@@ -21,13 +21,10 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libfuse3-dev pkg-config libssl-dev python3-pyqt6
+          sudo apt-get install -y libfuse3-dev pkg-config libssl-dev libfontconfig1-dev
 
       - name: Check workspace
         run: cargo check --workspace --verbose
 
       - name: Run unit tests
         run: cargo test --workspace --verbose
-
-      - name: Validate PyQt6 GUI syntax
-        run: python3 -m py_compile src/gui/main.py

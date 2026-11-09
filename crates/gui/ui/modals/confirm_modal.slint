@@ -1,0 +1,119 @@
+import { Theme } from "../theme.slint";
+
+export component ConfirmModal inherits Rectangle {
+    in property <bool> is-open: false;
+    in property <string> title: "¿Estás seguro?";
+    in property <string> message: "Esta acción no se puede deshacer.";
+    in property <string> confirm-text: "Confirmar";
+    in property <bool> is-danger: false;
+
+    callback confirmed();
+    callback cancelled();
+
+    width: 100%;
+    height: 100%;
+    background: #00000099;
+    visible: root.is-open;
+
+    TouchArea {
+        clicked => { root.cancelled(); }
+    }
+
+    Rectangle {
+        width: 440px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.bg-card;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        clip: true;
+
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 16px;
+
+            // Icon & Title
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: start;
+                Text {
+                    text: root.is-danger ? "⚠️" : "ℹ️";
+                    font-size: 22px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.title;
+                    font-size: 16px;
+                    font-weight: 700;
+                    color: Theme.text-main;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+
+            // Message Body
+            Text {
+                text: root.message;
+                font-size: 13px;
+                color: Theme.text-secondary;
+                wrap: word-wrap;
+            }
+
+            // Buttons
+            HorizontalLayout {
+                alignment: end;
+                spacing: 10px;
+
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: touch_cancel.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                    border-width: 1px;
+                    border-color: touch_cancel.has-hover ? #ffffff2e : Theme.border-color;
+                    height: 34px;
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        Text {
+                            text: "Cancelar";
+                            font-size: 12px;
+                            font-weight: 500;
+                            color: touch_cancel.has-hover ? Theme.text-main : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                    }
+                    touch_cancel := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.cancelled(); }
+                    }
+                }
+
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: root.is-danger
+                        ? (touch_confirm.has-hover ? #dc2626 : Theme.danger)
+                        : (touch_confirm.has-hover ? Theme.accent-hover : Theme.accent);
+                    height: 34px;
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        Text {
+                            text: root.confirm-text;
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: white;
+                            vertical-alignment: center;
+                        }
+                    }
+                    touch_confirm := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.confirmed(); }
+                    }
+                }
+            }
+        }
+    }
+}

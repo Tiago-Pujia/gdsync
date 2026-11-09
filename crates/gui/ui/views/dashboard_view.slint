@@ -1,0 +1,304 @@
+import { Theme } from "../theme.slint";
+import { StatCard } from "../components/stat_card.slint";
+
+export component DashboardView inherits VerticalLayout {
+    in property <string> drive-used-str: "11.4 GB";
+    in property <string> drive-total-str: "15.0 GB";
+    in property <float> drive-pct: 0.76;
+
+    in property <string> cache-used-str: "1.8 GB";
+    in property <string> cache-limit-str: "10 GB";
+    in property <int> cache-files-count: 420;
+    in property <float> cache-pct: 0.18;
+
+    in property <int> pinned-count: 34;
+    in property <int> pending-uploads-count: 0;
+    in property <string> pending-bytes-str: "0 B";
+
+    callback open-dolphin();
+    callback open-pinned-dialog();
+    callback open-drive-web-root();
+    callback go-to-settings();
+    callback go-to-logs();
+
+    alignment: start;
+    spacing: 20px;
+    padding: 24px;
+
+    // View Header
+    VerticalLayout {
+        spacing: 4px;
+        Text {
+            text: "Estado de Sincronización";
+            font-size: 20px;
+            font-weight: 700;
+            color: Theme.text-main;
+        }
+        Text {
+            text: "Todo al día. El sistema de archivos FUSE está montado de forma segura.";
+            font-size: 13px;
+            color: Theme.text-secondary;
+        }
+    }
+
+    // Stats Grid
+    HorizontalLayout {
+        spacing: 14px;
+        StatCard {
+            icon: "☁️";
+            title: "Almacenamiento Remoto";
+            value: root.drive-used-str;
+            subtitle: "de \{root.drive-total-str} (\{Math.round(root.drive-pct * 100)}% cuota)";
+        }
+        StatCard {
+            icon: "💾";
+            title: "Caché Local";
+            value: root.cache-used-str;
+            subtitle: "\{root.cache-files-count} archivos descargados";
+        }
+        StatCard {
+            icon: "📌";
+            title: "Disponibles Offline";
+            value: "\{root.pinned-count}";
+            subtitle: "Carpetas y archivos anclados";
+        }
+        StatCard {
+            icon: "📤";
+            title: "Cola de Subida";
+            value: "\{root.pending-uploads-count}";
+            subtitle: "\{root.pending-bytes-str} pendientes";
+        }
+    }
+
+    // Storage Usage Detail Card
+    Rectangle {
+        background: Theme.bg-card;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 16px;
+
+            HorizontalLayout {
+                alignment: space-between;
+                Text {
+                    text: "📊 Uso de Almacenamiento & Caché";
+                    font-size: 15px;
+                    font-weight: 600;
+                    color: Theme.text-main;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: touch_adjust.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                    border-width: 1px;
+                    border-color: touch_adjust.has-hover ? #ffffff2e : Theme.border-color;
+                    height: 28px;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        alignment: center;
+                        Text {
+                            text: "Ajustar Límites";
+                            font-size: 12px;
+                            color: touch_adjust.has-hover ? Theme.text-main : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                    }
+                    touch_adjust := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.go-to-settings(); }
+                    }
+                }
+            }
+
+            // Google Drive Cloud Bar
+            VerticalLayout {
+                spacing: 6px;
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Google Drive Cloud";
+                        font-size: 12px;
+                        color: Theme.text-secondary;
+                    }
+                    Text {
+                        text: "\{root.drive-used-str} / \{root.drive-total-str} (\{Math.round(root.drive-pct * 100)}%)";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Theme.text-main;
+                    }
+                }
+                Rectangle {
+                    height: 8px;
+                    background: Theme.bg-surface;
+                    border-radius: 4px;
+                    clip: true;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * Math.min(1.0, root.drive-pct);
+                        background: Theme.accent;
+                        border-radius: 4px;
+                    }
+                }
+            }
+
+            // Local Cache Bar
+            VerticalLayout {
+                spacing: 6px;
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Caché en disco SSD";
+                        font-size: 12px;
+                        color: Theme.text-secondary;
+                    }
+                    Text {
+                        text: "\{root.cache-used-str} / \{root.cache-limit-str} (\{Math.round(root.cache-pct * 100)}%)";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Theme.text-main;
+                    }
+                }
+                Rectangle {
+                    height: 8px;
+                    background: Theme.bg-surface;
+                    border-radius: 4px;
+                    clip: true;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * Math.min(1.0, root.cache-pct);
+                        background: Theme.success;
+                        border-radius: 4px;
+                    }
+                }
+            }
+        }
+    }
+
+    // Quick Actions & Mount Card
+    Rectangle {
+        background: Theme.bg-card;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+            Text {
+                text: "⚡ Accesos Rápidos & Montaje";
+                font-size: 15px;
+                font-weight: 600;
+                color: Theme.text-main;
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: touch_open.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                    border-width: 1px;
+                    border-color: touch_open.has-hover ? #ffffff2e : Theme.border-color;
+                    height: 32px;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 6px;
+                        Text { text: "📂"; font-size: 13px; vertical-alignment: center; }
+                        Text {
+                            text: "Abrir ~/GoogleDrive";
+                            font-size: 12px;
+                            font-weight: 500;
+                            color: touch_open.has-hover ? Theme.text-main : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                    }
+                    touch_open := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.open-dolphin(); }
+                    }
+                }
+
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: touch_pinned.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                    border-width: 1px;
+                    border-color: touch_pinned.has-hover ? #ffffff2e : Theme.border-color;
+                    height: 32px;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 6px;
+                        Text { text: "📌"; font-size: 13px; vertical-alignment: center; }
+                        Text {
+                            text: "Gestionar elementos Offline";
+                            font-size: 12px;
+                            font-weight: 500;
+                            color: touch_pinned.has-hover ? Theme.text-main : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                    }
+                    touch_pinned := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.open-pinned-dialog(); }
+                    }
+                }
+
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: touch_web.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                    border-width: 1px;
+                    border-color: touch_web.has-hover ? #ffffff2e : Theme.border-color;
+                    height: 32px;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 6px;
+                        Text { text: "🌐"; font-size: 13px; vertical-alignment: center; }
+                        Text {
+                            text: "Ir a Google Drive Web";
+                            font-size: 12px;
+                            font-weight: 500;
+                            color: touch_web.has-hover ? Theme.text-main : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                    }
+                    touch_web := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.open-drive-web-root(); }
+                    }
+                }
+
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: touch_logs.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                    border-width: 1px;
+                    border-color: touch_logs.has-hover ? #ffffff2e : Theme.border-color;
+                    height: 32px;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 6px;
+                        Text { text: "📜"; font-size: 13px; vertical-alignment: center; }
+                        Text {
+                            text: "Ver registros en vivo";
+                            font-size: 12px;
+                            font-weight: 500;
+                            color: touch_logs.has-hover ? Theme.text-main : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                    }
+                    touch_logs := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.go-to-logs(); }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,51 @@
+import { Theme } from "../theme.slint";
+
+export component StatCard inherits Rectangle {
+    in property <string> icon: "☁️";
+    in property <string> title: "Almacenamiento";
+    in property <string> value: "11.4 GB";
+    in property <string> subtitle: "de 15.0 GB (76% cuota)";
+
+    background: touch.has-hover ? Theme.bg-card-hover : Theme.bg-card;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: touch.has-hover ? (Theme.is-dark ? #ffffff26 : #00000020) : Theme.border-color;
+
+    touch := TouchArea {}
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 6px;
+        alignment: space-between;
+
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            Text {
+                text: root.icon;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.title;
+                font-size: 12px;
+                font-weight: 500;
+                color: Theme.text-muted;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: root.value;
+            font-size: 20px;
+            font-weight: 700;
+            color: Theme.text-main;
+        }
+
+        Text {
+            text: root.subtitle;
+            font-size: 11px;
+            color: Theme.text-secondary;
+        }
+    }
+}

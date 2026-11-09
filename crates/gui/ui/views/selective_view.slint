@@ -1,0 +1,202 @@
+import { Theme } from "../theme.slint";
+import { FolderNode } from "../models.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export component SelectiveView inherits VerticalLayout {
+    in property <[FolderNode]> folders: [];
+    in property <bool> is-saving: false;
+
+    callback toggle-folder(string, bool);
+    callback sync-all-folders();
+    callback save-selection();
+
+    spacing: 16px;
+    padding: 24px;
+    alignment: start;
+
+    // View Header
+    HorizontalLayout {
+        alignment: space-between;
+        VerticalLayout {
+            spacing: 4px;
+            Text {
+                text: "Sincronización Selectiva";
+                font-size: 20px;
+                font-weight: 700;
+                color: Theme.text-main;
+            }
+            Text {
+                text: "Elegí qué carpetas querés que se sincronicen en tu equipo para ahorrar espacio en disco.";
+                font-size: 13px;
+                color: Theme.text-secondary;
+            }
+        }
+
+        Rectangle {
+            border-radius: Theme.radius-sm;
+            background: touch_save.has-hover ? Theme.accent-hover : Theme.accent;
+            height: 32px;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                alignment: center;
+                Text {
+                    text: root.is-saving ? "Guardando..." : "Guardar Selección";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: white;
+                    vertical-alignment: center;
+                }
+            }
+            touch_save := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.save-selection(); }
+            }
+        }
+    }
+
+    // Main Card
+    Rectangle {
+        background: Theme.bg-card;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+
+            // Header of tree box
+            HorizontalLayout {
+                alignment: space-between;
+                Text {
+                    text: "Carpetas remotas de Google Drive";
+                    font-size: 13px;
+                    font-weight: 600;
+                    color: Theme.text-main;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: touch_root.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                    border-width: 1px;
+                    border-color: touch_root.has-hover ? #ffffff2e : Theme.border-color;
+                    height: 26px;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        alignment: center;
+                        Text {
+                            text: "Sincronizar toda la unidad ('root')";
+                            font-size: 11px;
+                            font-weight: 500;
+                            color: touch_root.has-hover ? Theme.text-main : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                    }
+                    touch_root := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.sync-all-folders(); }
+                    }
+                }
+            }
+
+            // Tree Container
+            Rectangle {
+                background: Theme.bg-surface;
+                border-radius: Theme.radius-md;
+                border-width: 1px;
+                border-color: Theme.border-color;
+                clip: true;
+
+                ScrollView {
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 2px;
+
+                        for f in root.folders: Rectangle {
+                            height: 36px;
+                            border-radius: Theme.radius-sm;
+                            background: touch.has-hover ? Theme.bg-surface-hover : transparent;
+
+                            touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.toggle-folder(f.id, !f.checked);
+                                }
+                            }
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 10px;
+                                alignment: start;
+
+                                // Custom Checkbox
+                                Rectangle {
+                                    width: 18px;
+                                    height: 18px;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: 4px;
+                                    border-width: 1.5px;
+                                    border-color: f.checked ? Theme.accent : Theme.text-muted;
+                                    background: f.checked ? Theme.accent : transparent;
+
+                                    if f.checked: Text {
+                                        text: "✓";
+                                        color: white;
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                Text {
+                                    text: "📁";
+                                    font-size: 14px;
+                                    vertical-alignment: center;
+                                }
+
+                                Text {
+                                    text: f.name;
+                                    font-size: 13px;
+                                    font-weight: 500;
+                                    color: f.checked ? Theme.text-main : Theme.text-muted;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+
+                                if !f.checked: Text {
+                                    text: "(Ignorada - Solo nube)";
+                                    font-size: 11px;
+                                    color: Theme.text-muted;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        if root.folders.length == 0: VerticalLayout {
+                            alignment: center;
+                            height: 140px;
+                            spacing: 8px;
+                            Text {
+                                text: "📂";
+                                font-size: 28px;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "No se encontraron carpetas o no hay sesión iniciada.";
+                                font-size: 13px;
+                                color: Theme.text-muted;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

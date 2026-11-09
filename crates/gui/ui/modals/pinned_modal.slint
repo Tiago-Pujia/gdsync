@@ -1,0 +1,300 @@
+import { Theme } from "../theme.slint";
+import { PinnedItemEntry } from "../models.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export component PinnedModal inherits Rectangle {
+    in property <bool> is-open: false;
+    in property <[PinnedItemEntry]> items: [];
+    in-out property <string> search-text: "";
+    in property <string> summary-text: "";
+
+    callback close();
+    callback search-changed(string);
+    callback unpin-item(string);
+    callback open-dolphin(string);
+    callback open-web(string);
+
+    width: 100%;
+    height: 100%;
+    background: #00000099;
+    visible: root.is-open;
+
+    // Prevent clicks on backdrop from passing through
+    TouchArea {
+        clicked => { root.close(); }
+    }
+
+    Rectangle {
+        width: 820px;
+        height: 520px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.bg-card;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        clip: true;
+
+        // Catch clicks inside modal card
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+
+            // Header
+            HorizontalLayout {
+                alignment: space-between;
+                VerticalLayout {
+                    spacing: 2px;
+                    Text {
+                        text: "📌 Elementos Disponibles Sin Conexión";
+                        font-size: 16px;
+                        font-weight: 700;
+                        color: Theme.text-main;
+                    }
+                    Text {
+                        text: root.summary-text != "" ? root.summary-text : "Carpetas y archivos anclados localmente en tu equipo.";
+                        font-size: 12px;
+                        color: Theme.text-secondary;
+                    }
+                }
+
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 14px;
+                    background: touch-close.has-hover ? Theme.bg-surface-hover : transparent;
+                    Text {
+                        text: "✕";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    touch-close := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.close(); }
+                    }
+                }
+            }
+
+            // Search Bar
+            Rectangle {
+                height: 34px;
+                background: Theme.bg-surface;
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: Theme.border-color;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 8px;
+                    Text { text: "🔍"; font-size: 12px; vertical-alignment: center; }
+                    TextInput {
+                        text <=> root.search-text;
+                        font-size: 12px;
+                        color: Theme.text-main;
+                        vertical-alignment: center;
+                        edited => { root.search-changed(self.text); }
+                    }
+                }
+            }
+
+            // Table Header
+            Rectangle {
+                height: 28px;
+                background: Theme.bg-surface;
+                border-radius: Theme.radius-sm;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 8px;
+                    Text { text: "Nombre / Ubicación"; font-size: 11px; font-weight: 600; color: Theme.text-secondary; width: 310px; vertical-alignment: center; }
+                    Text { text: "Archivos"; font-size: 11px; font-weight: 600; color: Theme.text-secondary; width: 70px; horizontal-alignment: right; vertical-alignment: center; }
+                    Text { text: "Tamaño"; font-size: 11px; font-weight: 600; color: Theme.text-secondary; width: 80px; horizontal-alignment: right; vertical-alignment: center; }
+                    Text { text: "Estado Caché"; font-size: 11px; font-weight: 600; color: Theme.text-secondary; width: 110px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Acciones"; font-size: 11px; font-weight: 600; color: Theme.text-secondary; width: 130px; horizontal-alignment: right; vertical-alignment: center; }
+                }
+            }
+
+            // Table Body
+            Rectangle {
+                background: Theme.bg-surface;
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: Theme.border-color;
+                clip: true;
+                vertical-stretch: 1;
+
+                ScrollView {
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 2px;
+
+                        for item in root.items: Rectangle {
+                            height: 38px;
+                            border-radius: Theme.radius-sm;
+                            background: item-touch.has-hover ? Theme.bg-surface-hover : transparent;
+
+                            item-touch := TouchArea {}
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 8px;
+                                alignment: center;
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    width: 310px;
+                                    alignment: start;
+                                    Text {
+                                        text: item.is-folder ? "📁" : "📄";
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: item.name;
+                                        font-size: 12px;
+                                        font-weight: 500;
+                                        color: Theme.text-main;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                Text {
+                                    text: item.count-str;
+                                    font-size: 11px;
+                                    color: Theme.text-secondary;
+                                    width: 70px;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                }
+
+                                Text {
+                                    text: item.size-str;
+                                    font-size: 11px;
+                                    color: Theme.text-secondary;
+                                    width: 80px;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                }
+
+                                Text {
+                                    text: item.cache-str;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    color: item.is-fully-cached ? Theme.success : Theme.warning;
+                                    width: 110px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                HorizontalLayout {
+                                    width: 130px;
+                                    alignment: end;
+                                    spacing: 6px;
+
+                                    Rectangle {
+                                        border-radius: Theme.radius-sm;
+                                        background: touch_unpin.has-hover ? Theme.danger.transparentize(0.7) : Theme.bg-card;
+                                        border-width: 1px;
+                                        border-color: touch_unpin.has-hover ? Theme.danger : Theme.border-color;
+                                        height: 24px;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            Text {
+                                                text: "Liberar";
+                                                font-size: 10px;
+                                                font-weight: 600;
+                                                color: Theme.danger;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        touch_unpin := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.unpin-item(item.id); }
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        border-radius: Theme.radius-sm;
+                                        background: touch_dolph.has-hover ? Theme.bg-surface-hover : Theme.bg-card;
+                                        border-width: 1px;
+                                        border-color: touch_dolph.has-hover ? #ffffff2e : Theme.border-color;
+                                        height: 24px;
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            Text {
+                                                text: "📂";
+                                                font-size: 11px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        touch_dolph := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.open-dolphin(item.full-path); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.items.length == 0: VerticalLayout {
+                            alignment: center;
+                            height: 140px;
+                            spacing: 8px;
+                            Text {
+                                text: "📌";
+                                font-size: 28px;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "No hay elementos anclados que coincidan con la búsqueda.";
+                                font-size: 12px;
+                                color: Theme.text-muted;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Bottom Bar
+            HorizontalLayout {
+                alignment: end;
+                spacing: 10px;
+
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: touch_bottom_close.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                    border-width: 1px;
+                    border-color: touch_bottom_close.has-hover ? #ffffff2e : Theme.border-color;
+                    height: 32px;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        Text {
+                            text: "Cerrar";
+                            font-size: 12px;
+                            font-weight: 500;
+                            color: touch_bottom_close.has-hover ? Theme.text-main : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                    }
+                    touch_bottom_close := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.close(); }
+                    }
+                }
+            }
+        }
+    }
+}

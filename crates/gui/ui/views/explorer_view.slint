@@ -1,0 +1,367 @@
+import { Theme } from "../theme.slint";
+import { Badge } from "../components/badge.slint";
+import { FileEntry } from "../models.slint";
+import { ListView } from "std-widgets.slint";
+
+export component ExplorerView inherits VerticalLayout {
+    in property <[FileEntry]> files: [];
+    in-out property <string> search-text: "";
+    in-out property <int> active-filter: 0; // 0=Todos, 1=Offline, 2=Caché, 3=Nube
+
+    callback search-changed(string);
+    callback filter-changed(int);
+    callback reload-files();
+    callback toggle-pin(string, bool);
+    callback copy-link(string);
+    callback open-web(string);
+    callback open-local(string);
+
+    spacing: 16px;
+    padding: 24px;
+
+    // View Header
+    HorizontalLayout {
+        alignment: space-between;
+        VerticalLayout {
+            spacing: 4px;
+            Text {
+                text: "Explorador de Google Drive";
+                font-size: 20px;
+                font-weight: 700;
+                color: Theme.text-main;
+            }
+            Text {
+                text: "Examiná los archivos indexados en SQLite y controlá la disponibilidad sin conexión.";
+                font-size: 13px;
+                color: Theme.text-secondary;
+            }
+        }
+
+        Rectangle {
+            border-radius: Theme.radius-sm;
+            background: touch_reload.has-hover ? Theme.accent-hover : Theme.accent;
+            height: 32px;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 6px;
+                alignment: center;
+                Text { text: "🔄"; font-size: 12px; vertical-alignment: center; }
+                Text { text: "Actualizar"; font-size: 12px; font-weight: 600; color: white; vertical-alignment: center; }
+            }
+            touch_reload := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.reload-files(); }
+            }
+        }
+    }
+
+    // Toolbar (Search & Filter Pills)
+    HorizontalLayout {
+        alignment: space-between;
+        spacing: 14px;
+
+        // Search Input
+        Rectangle {
+            width: 340px;
+            height: 34px;
+            border-radius: Theme.radius-md;
+            background: Theme.bg-surface;
+            border-width: 1px;
+            border-color: search_input.has-focus ? Theme.accent : Theme.border-color;
+
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 8px;
+                alignment: center;
+                Text { text: "🔍"; font-size: 12px; vertical-alignment: center; color: Theme.text-muted; }
+                search_input := TextInput {
+                    text <=> root.search-text;
+                    font-size: 13px;
+                    color: Theme.text-main;
+                    vertical-alignment: center;
+                    edited => { root.search-changed(self.text); }
+                }
+            }
+        }
+
+        // Filter Pills
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: end;
+
+            Rectangle {
+                border-radius: 16px;
+                background: root.active-filter == 0 ? Theme.accent : (touch_f0.has-hover ? Theme.bg-surface-hover : Theme.bg-surface);
+                border-width: 1px;
+                border-color: root.active-filter == 0 ? Theme.accent : (touch_f0.has-hover ? Theme.text-muted : Theme.border-color);
+                height: 30px;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    alignment: center;
+                    Text {
+                        text: "Todos";
+                        font-size: 12px;
+                        font-weight: 500;
+                        color: root.active-filter == 0 ? white : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                }
+                touch_f0 := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.active-filter = 0; root.filter-changed(0); }
+                }
+            }
+
+            Rectangle {
+                border-radius: 16px;
+                background: root.active-filter == 1 ? Theme.accent : (touch_f1.has-hover ? Theme.bg-surface-hover : Theme.bg-surface);
+                border-width: 1px;
+                border-color: root.active-filter == 1 ? Theme.accent : (touch_f1.has-hover ? Theme.text-muted : Theme.border-color);
+                height: 30px;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    alignment: center;
+                    Text {
+                        text: "📌 Offline";
+                        font-size: 12px;
+                        font-weight: 500;
+                        color: root.active-filter == 1 ? white : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                }
+                touch_f1 := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.active-filter = 1; root.filter-changed(1); }
+                }
+            }
+
+            Rectangle {
+                border-radius: 16px;
+                background: root.active-filter == 2 ? Theme.accent : (touch_f2.has-hover ? Theme.bg-surface-hover : Theme.bg-surface);
+                border-width: 1px;
+                border-color: root.active-filter == 2 ? Theme.accent : (touch_f2.has-hover ? Theme.text-muted : Theme.border-color);
+                height: 30px;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    alignment: center;
+                    Text {
+                        text: "💾 En Caché";
+                        font-size: 12px;
+                        font-weight: 500;
+                        color: root.active-filter == 2 ? white : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                }
+                touch_f2 := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.active-filter = 2; root.filter-changed(2); }
+                }
+            }
+
+            Rectangle {
+                border-radius: 16px;
+                background: root.active-filter == 3 ? Theme.accent : (touch_f3.has-hover ? Theme.bg-surface-hover : Theme.bg-surface);
+                border-width: 1px;
+                border-color: root.active-filter == 3 ? Theme.accent : (touch_f3.has-hover ? Theme.text-muted : Theme.border-color);
+                height: 30px;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    alignment: center;
+                    Text {
+                        text: "☁️ Nube";
+                        font-size: 12px;
+                        font-weight: 500;
+                        color: root.active-filter == 3 ? white : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                }
+                touch_f3 := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.active-filter = 3; root.filter-changed(3); }
+                }
+            }
+        }
+    }
+
+    // Table Container
+    Rectangle {
+        background: Theme.bg-card;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        clip: true;
+
+        VerticalLayout {
+            // Table Header
+            Rectangle {
+                height: 38px;
+                background: Theme.bg-surface;
+                border-width: 1px;
+                border-color: Theme.border-color;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    alignment: space-between;
+
+                    Text { width: 280px; text: "NOMBRE"; font-size: 11px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center; }
+                    Text { width: 160px; text: "UBICACIÓN"; font-size: 11px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center; }
+                    Text { width: 90px; text: "TAMAÑO"; font-size: 11px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center; }
+                    Text { width: 140px; text: "ESTADO"; font-size: 11px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center; }
+                    Text { width: 100px; text: "ACCIONES"; font-size: 11px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center; horizontal-alignment: right; }
+                }
+            }
+
+            // Scrollable List
+            ListView {
+                for file in root.files : Rectangle {
+                    height: 44px;
+                    background: row_touch.has-hover ? Theme.bg-surface-hover : Colors.transparent;
+
+                    row_touch := TouchArea {
+                        double-clicked => { root.open-local(file.id); }
+                    }
+
+                    // Row divider line
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.border-color.transparentize(0.5);
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        alignment: space-between;
+
+                        // Name
+                        HorizontalLayout {
+                            width: 280px;
+                            spacing: 8px;
+                            alignment: start;
+                            Text {
+                                width: 20px;
+                                text: file.is-folder ? "📁" : "📄";
+                                font-size: 14px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: file.name;
+                                font-size: 13px;
+                                font-weight: 500;
+                                color: Theme.text-main;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+
+                        // Location
+                        Text {
+                            width: 160px;
+                            text: file.location;
+                            font-size: 12px;
+                            color: Theme.text-secondary;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        // Size
+                        Text {
+                            width: 90px;
+                            text: file.size-str;
+                            font-size: 12px;
+                            color: Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+
+                        // Status Badge
+                        HorizontalLayout {
+                            width: 140px;
+                            alignment: start;
+                            y: (parent.height - 22px) / 2;
+                            if file.is-folder : Badge {
+                                text: "📁 Carpeta";
+                                badge-color: Theme.text-secondary;
+                                badge-bg: Theme.bg-surface;
+                            }
+                            if !file.is-folder && file.pinned : Badge {
+                                text: "📌 Offline";
+                                badge-color: Theme.success;
+                                badge-bg: Theme.success.transparentize(0.85);
+                            }
+                            if !file.is-folder && !file.pinned && file.status == 2 : Badge {
+                                text: "💾 En Caché";
+                                badge-color: #0ea5e9;
+                                badge-bg: #0ea5e9.transparentize(0.85);
+                            }
+                            if !file.is-folder && !file.pinned && file.status == 3 : Badge {
+                                text: "☁️ Nube";
+                                badge-color: #a78bfa;
+                                badge-bg: #a78bfa.transparentize(0.85);
+                            }
+                        }
+
+                        // Actions
+                        HorizontalLayout {
+                            width: 100px;
+                            spacing: 6px;
+                            alignment: end;
+
+                            // Pin/Unpin
+                            Rectangle {
+                                border-radius: Theme.radius-sm;
+                                background: touch_pin.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                                border-width: 1px;
+                                border-color: touch_pin.has-hover ? #ffffff2e : Theme.border-color;
+                                height: 26px;
+                                y: (parent.height - self.height) / 2;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    Text {
+                                        text: file.pinned ? "Liberar" : "Anclar";
+                                        font-size: 11px;
+                                        font-weight: 500;
+                                        color: touch_pin.has-hover ? Theme.text-main : Theme.text-secondary;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                touch_pin := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.toggle-pin(file.id, !file.pinned); }
+                                }
+                            }
+
+                            // Copy link button
+                            Rectangle {
+                                width: 26px;
+                                height: 26px;
+                                border-radius: Theme.radius-sm;
+                                background: touch_link.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                                border-width: 1px;
+                                border-color: touch_link.has-hover ? #ffffff2e : Theme.border-color;
+                                y: (parent.height - self.height) / 2;
+                                Text {
+                                    text: "🔗";
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                }
+                                touch_link := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.copy-link(file.id); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,317 @@
+import { Theme } from "./theme.slint";
+import { FileEntry, QueueEntry, FolderNode, PinnedItemEntry, LogEntry, ToastMessage } from "./models.slint";
+import { Header } from "./components/header.slint";
+import { Sidebar } from "./components/sidebar.slint";
+import { Toast } from "./components/toast.slint";
+import { DashboardView } from "./views/dashboard_view.slint";
+import { ExplorerView } from "./views/explorer_view.slint";
+import { QueueView } from "./views/queue_view.slint";
+import { SelectiveView } from "./views/selective_view.slint";
+import { AccountView } from "./views/account_view.slint";
+import { SettingsView } from "./views/settings_view.slint";
+import { LogsView } from "./views/logs_view.slint";
+import { PinnedModal } from "./modals/pinned_modal.slint";
+import { TutorialModal } from "./modals/tutorial_modal.slint";
+import { ConfirmModal } from "./modals/confirm_modal.slint";
+import { ErrorModal } from "./modals/error_modal.slint";
+
+export component AppWindow inherits Window {
+    title: "gdsync - Google Drive FUSE Desktop";
+    preferred-width: 1080px;
+    preferred-height: 720px;
+    min-width: 920px;
+    min-height: 620px;
+    background: Theme.bg-app;
+
+    // State properties
+    in-out property <int> active-tab: 0;
+    in property <bool> daemon-running: true;
+    in property <bool> account-connected: false;
+    in property <string> account-label: "No conectado";
+    in property <string> user-email: "";
+    in property <string> user-avatar: "G";
+
+    // Storage and Cache Metrics
+    in property <string> drive-used-str: "0 B";
+    in property <string> drive-total-str: "15.0 GB";
+    in property <float> drive-pct: 0.0;
+    in property <string> cache-used-str: "0 B";
+    in property <string> cache-limit-str: "10 GB";
+    in property <int> cache-files-count: 0;
+    in property <float> cache-pct: 0.0;
+    in property <int> pinned-count: 0;
+    in property <int> pending-uploads-count: 0;
+    in property <string> pending-bytes-str: "0 B";
+
+    // Lists
+    in property <[FileEntry]> files: [];
+    in property <[QueueEntry]> queue-items: [];
+    in property <[FolderNode]> folder-nodes: [];
+    in property <[PinnedItemEntry]> pinned-items: [];
+    in property <string> pinned-summary: "";
+    in property <[LogEntry]> logs: [];
+
+    // Settings
+    in-out property <string> mount-point: "/home/tiago/GoogleDrive";
+    in-out property <string> cache-size-gb: "10";
+    in-out property <string> poll-interval-secs: "30";
+    in-out property <bool> autostart-gui: true;
+    in-out property <bool> autostart-daemon: true;
+    in-out property <bool> notify-enabled: true;
+    in-out property <bool> resident-notify: true;
+    in-out property <bool> close-to-tray: true;
+
+    // Account credentials
+    in-out property <string> client-id: "";
+    in-out property <string> client-secret: "";
+    in property <bool> is-logging-in: false;
+
+    // Toast
+    in-out property <bool> toast-visible: false;
+    in property <string> toast-title: "";
+    in property <string> toast-message: "";
+    in property <bool> toast-is-warning: false;
+
+    // Modals
+    in-out property <bool> pinned-modal-open: false;
+    in-out property <bool> tutorial-modal-open: false;
+    in-out property <int> tutorial-step: 0;
+    in-out property <bool> tutorial-view-all: false;
+    in-out property <bool> confirm-modal-open: false;
+    in-out property <bool> error-modal-open: false;
+    in-out property <string> confirm-title: "¿Estás seguro?";
+    in-out property <string> confirm-message: "Esta acción no se puede deshacer.";
+    in-out property <string> confirm-btn-text: "Confirmar";
+    in-out property <bool> confirm-is-danger: false;
+    in-out property <string> confirm-action-tag: "";
+    in-out property <string> error-title: "Error";
+    in-out property <string> error-text: "";
+
+    // Callbacks from Header & Global
+    callback toggle-daemon();
+    callback open-dolphin();
+    callback sync-now();
+    callback toggle-theme();
+    callback show-account();
+
+    // Callbacks from Explorer
+    callback explorer-search(string);
+    callback explorer-filter(int);
+    callback reload-files();
+    callback toggle-pin(string, bool);
+    callback copy-link(string);
+    callback open-web(string);
+    callback open-local(string);
+
+    // Callbacks from Queue
+    callback retry-queue-item(int);
+    callback cancel-queue-item(int);
+    callback retry-all-queue();
+
+    // Callbacks from Selective
+    callback toggle-folder(string, bool);
+    callback sync-all-folders();
+    callback save-folder-selection();
+
+    // Callbacks from Account
+    callback logout();
+    callback import-credentials-json();
+    callback save-credentials(string, string);
+    callback login-oauth();
+
+    // Callbacks from Settings
+    callback browse-mount-point();
+    callback save-settings();
+    callback request-resync();
+
+    // Callbacks from Logs
+    callback refresh-logs();
+    callback clear-logs();
+
+    // Callbacks from Modals
+    callback modal-confirmed(string);
+    callback modal-cancelled();
+    callback unpin-item(string);
+    callback pinned-modal-search(string);
+    callback open-console-link();
+
+    VerticalLayout {
+        spacing: 0px;
+
+        // Top Navigation Header
+        Header {
+            daemon-running: root.daemon-running;
+            account-connected: root.account-connected;
+            account-label: root.account-label;
+
+            toggle-daemon => { root.toggle-daemon(); }
+            open-dolphin => { root.open-dolphin(); }
+            sync-now => { root.sync-now(); }
+            toggle-theme => {
+                Theme.is-dark = !Theme.is-dark;
+                root.toggle-theme();
+            }
+            show-account => { root.active-tab = 4; }
+        }
+
+        // Main Workspace Area (Sidebar + Content)
+        HorizontalLayout {
+            spacing: 0px;
+
+            Sidebar {
+                active-tab <=> root.active-tab;
+                total-files-count: root.files.length;
+                pending-queue-count: root.pending-uploads-count;
+                storage-pct: root.drive-pct;
+                storage-desc: "\{root.drive-used-str} de \{root.drive-total-str} usados";
+                tab-selected(idx) => { root.active-tab = idx; }
+            }
+
+            Rectangle {
+                background: Theme.bg-app;
+                clip: true;
+
+                // View 0: Dashboard
+                if root.active-tab == 0: DashboardView {
+                    drive-used-str: root.drive-used-str;
+                    drive-total-str: root.drive-total-str;
+                    drive-pct: root.drive-pct;
+                    cache-used-str: root.cache-used-str;
+                    cache-limit-str: root.cache-limit-str;
+                    cache-files-count: root.cache-files-count;
+                    cache-pct: root.cache-pct;
+                    pinned-count: root.pinned-count;
+                    pending-uploads-count: root.pending-uploads-count;
+                    pending-bytes-str: root.pending-bytes-str;
+
+                    open-dolphin => { root.open-dolphin(); }
+                    open-pinned-dialog => { root.pinned-modal-open = true; }
+                    open-drive-web-root => { root.open-web(""); }
+                    go-to-settings => { root.active-tab = 5; }
+                    go-to-logs => { root.active-tab = 6; }
+                }
+
+                // View 1: Explorer
+                if root.active-tab == 1: ExplorerView {
+                    files: root.files;
+                    search-changed(q) => { root.explorer-search(q); }
+                    filter-changed(f) => { root.explorer-filter(f); }
+                    reload-files => { root.reload-files(); }
+                    toggle-pin(id, pin) => { root.toggle-pin(id, pin); }
+                    copy-link(id) => { root.copy-link(id); }
+                    open-web(id) => { root.open-web(id); }
+                    open-local(loc) => { root.open-local(loc); }
+                }
+
+                // View 2: Queue
+                if root.active-tab == 2: QueueView {
+                    queue-items: root.queue-items;
+                    retry-item(id) => { root.retry-queue-item(id); }
+                    discard-item(id) => { root.cancel-queue-item(id); }
+                    retry-all-failed => { root.retry-all-queue(); }
+                }
+
+                // View 3: Selective Sync
+                if root.active-tab == 3: SelectiveView {
+                    folders: root.folder-nodes;
+                    toggle-folder(id, checked) => { root.toggle-folder(id, checked); }
+                    sync-all-folders => { root.sync-all-folders(); }
+                    save-selection => { root.save-folder-selection(); }
+                }
+
+                // View 4: Account
+                if root.active-tab == 4: AccountView {
+                    user-email: root.user-email;
+                    user-avatar: root.user-avatar;
+                    is-logged-in: root.account-connected;
+                    client-id <=> root.client-id;
+                    client-secret <=> root.client-secret;
+                    is-logging-in: root.is-logging-in;
+
+                    logout => { root.logout(); }
+                    import-json => { root.import-credentials-json(); }
+                    save-credentials(id, secret) => { root.save-credentials(id, secret); }
+                    login-oauth => { root.login-oauth(); }
+                    show-tutorial => { root.tutorial-modal-open = true; }
+                }
+
+                // View 5: Settings
+                if root.active-tab == 5: SettingsView {
+                    mount-point <=> root.mount-point;
+                    cache-size-gb <=> root.cache-size-gb;
+                    poll-interval-secs <=> root.poll-interval-secs;
+                    autostart-gui <=> root.autostart-gui;
+                    autostart-daemon <=> root.autostart-daemon;
+                    notify-enabled <=> root.notify-enabled;
+                    resident-notify <=> root.resident-notify;
+                    close-to-tray <=> root.close-to-tray;
+
+                    browse-mount-point => { root.browse-mount-point(); }
+                    save-settings => { root.save-settings(); }
+                    confirm-resync => { root.request-resync(); }
+                }
+
+                // View 6: Logs
+                if root.active-tab == 6: LogsView {
+                    logs: root.logs;
+                    refresh-logs => { root.refresh-logs(); }
+                    clear-logs => { root.clear-logs(); }
+                }
+            }
+        }
+    }
+
+    // Modal Overlays
+    PinnedModal {
+        is-open: root.pinned-modal-open;
+        items: root.pinned-items;
+        summary-text: root.pinned-summary;
+        close => { root.pinned-modal-open = false; }
+        search-changed(q) => { root.pinned-modal-search(q); }
+        unpin-item(id) => { root.unpin-item(id); }
+        open-dolphin(p) => { root.open-local(p); }
+        open-web(id) => { root.open-web(id); }
+    }
+
+    TutorialModal {
+        is-open: root.tutorial-modal-open;
+        current-step <=> root.tutorial-step;
+        view-all <=> root.tutorial-view-all;
+        close => { root.tutorial-modal-open = false; }
+        open-console-link => { root.open-console-link(); }
+    }
+
+    ConfirmModal {
+        is-open: root.confirm-modal-open;
+        title: root.confirm-title;
+        message: root.confirm-message;
+        confirm-text: root.confirm-btn-text;
+        is-danger: root.confirm-is-danger;
+        confirmed => {
+            root.confirm-modal-open = false;
+            root.modal-confirmed(root.confirm-action-tag);
+        }
+        cancelled => {
+            root.confirm-modal-open = false;
+            root.modal-cancelled();
+        }
+    }
+
+    ErrorModal {
+        is-open: root.error-modal-open;
+        title: root.error-title;
+        error-text: root.error-text;
+        close => { root.error-modal-open = false; }
+    }
+
+    // Toast Notification Banner (lower right)
+    Toast {
+        x: parent.width - self.width - 24px;
+        y: parent.height - self.height - 24px;
+        title: root.toast-title;
+        message: root.toast-message;
+        is-warning: root.toast-is-warning;
+        visible: root.toast-visible;
+        close => { root.toast-visible = false; }
+    }
+}

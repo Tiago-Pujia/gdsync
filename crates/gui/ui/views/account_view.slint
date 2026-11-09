@@ -1,0 +1,330 @@
+import { Theme } from "../theme.slint";
+
+export component AccountView inherits VerticalLayout {
+    in property <string> user-email: "";
+    in property <string> user-avatar: "G";
+    in property <bool> is-logged-in: false;
+    in-out property <string> client-id: "";
+    in-out property <string> client-secret: "";
+    in property <bool> is-logging-in: false;
+
+    callback logout();
+    callback import-json();
+    callback save-credentials(string, string);
+    callback login-oauth();
+    callback show-tutorial();
+
+    alignment: start;
+    spacing: 16px;
+    padding: 24px;
+
+    // View Header
+    HorizontalLayout {
+        alignment: space-between;
+        VerticalLayout {
+            spacing: 4px;
+            Text {
+                text: "Cuenta & Conexión OAuth";
+                font-size: 20px;
+                font-weight: 700;
+                color: Theme.text-main;
+            }
+            Text {
+                text: "Gestioná tu acceso seguro a la API de Google Drive.";
+                font-size: 13px;
+                color: Theme.text-secondary;
+            }
+        }
+
+        Rectangle {
+            border-radius: Theme.radius-sm;
+            background: touch_guide.has-hover ? Theme.bg-card-hover : Theme.bg-card;
+            border-width: 1px;
+            border-color: touch_guide.has-hover ? #ffffff2e : Theme.border-color;
+            height: 32px;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 6px;
+                Text { text: "📖"; font-size: 13px; vertical-alignment: center; }
+                Text {
+                    text: "Guía Google Cloud";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: touch_guide.has-hover ? Theme.text-main : Theme.text-secondary;
+                    vertical-alignment: center;
+                }
+            }
+            touch_guide := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.show-tutorial(); }
+            }
+        }
+    }
+
+    // Account Status Card
+    Rectangle {
+        background: Theme.bg-card;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+
+        HorizontalLayout {
+            padding: 20px;
+            alignment: space-between;
+
+            HorizontalLayout {
+                spacing: 16px;
+                alignment: start;
+
+                // Avatar
+                Rectangle {
+                    width: 48px;
+                    height: 48px;
+                    border-radius: 24px;
+                    background: root.is-logged-in ? #4285f4 : Theme.text-muted;
+                    Text {
+                        text: root.is-logged-in ? root.user-avatar : "?";
+                        font-size: 20px;
+                        font-weight: 700;
+                        color: white;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 4px;
+                    alignment: center;
+                    Text {
+                        text: root.is-logged-in ? (root.user-email != "" ? root.user-email : "Sesión Activa") : "No hay sesión iniciada";
+                        font-size: 15px;
+                        font-weight: 600;
+                        color: Theme.text-main;
+                    }
+                    Text {
+                        text: root.is-logged-in ? "● Sesión activa en Google Drive" : "○ Requiere autenticación OAuth";
+                        font-size: 12px;
+                        font-weight: 500;
+                        color: root.is-logged-in ? Theme.success : Theme.warning;
+                    }
+                }
+            }
+
+            Rectangle {
+                border-radius: Theme.radius-sm;
+                background: root.is-logged-in
+                    ? (touch_session.has-hover ? #dc2626 : Theme.danger)
+                    : (touch_session.has-hover ? Theme.accent-hover : Theme.accent);
+                height: 34px;
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    alignment: center;
+                    Text {
+                        text: root.is-logged-in ? "Cerrar Sesión" : (root.is-logging-in ? "Esperando navegador..." : "Iniciar Sesión");
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: white;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+                }
+                touch_session := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        if root.is-logged-in {
+                            root.logout();
+                        } else {
+                            root.login-oauth();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Import JSON Card
+    Rectangle {
+        background: Theme.bg-card;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 12px;
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text { text: "📄"; font-size: 15px; vertical-alignment: center; }
+                Text {
+                    text: "Importar credenciales de Google Cloud";
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: Theme.text-main;
+                    vertical-alignment: center;
+                }
+            }
+
+            Text {
+                text: "Si descargaste el archivo de claves de Google Cloud Console (normalmente client_secret_*.json en tu carpeta de Descargas), podés importarlo directamente aquí:";
+                font-size: 12px;
+                color: Theme.text-secondary;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                alignment: start;
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: touch_import.has-hover ? Theme.accent-hover : Theme.accent;
+                    height: 32px;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 6px;
+                        Text { text: "📂"; font-size: 12px; vertical-alignment: center; }
+                        Text { text: "Examinar archivo JSON..."; font-size: 12px; font-weight: 600; color: white; vertical-alignment: center; }
+                    }
+                    touch_import := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.import-json(); }
+                    }
+                }
+            }
+        }
+    }
+
+    // Manual Credentials Card
+    Rectangle {
+        background: Theme.bg-card;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text { text: "🔑"; font-size: 15px; vertical-alignment: center; }
+                Text {
+                    text: "Claves de aplicación (OAuth 2.0)";
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: Theme.text-main;
+                    vertical-alignment: center;
+                }
+            }
+
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "Client ID:";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Theme.text-secondary;
+                }
+                Rectangle {
+                    height: 34px;
+                    background: Theme.bg-surface;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: Theme.border-color;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        TextInput {
+                            text <=> root.client-id;
+                            font-size: 12px;
+                            color: Theme.text-main;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "Client Secret:";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Theme.text-secondary;
+                }
+                Rectangle {
+                    height: 34px;
+                    background: Theme.bg-surface;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: Theme.border-color;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        TextInput {
+                            text <=> root.client-secret;
+                            font-size: 12px;
+                            color: Theme.text-main;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: touch_save.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                    border-width: 1px;
+                    border-color: touch_save.has-hover ? #ffffff2e : Theme.border-color;
+                    height: 32px;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        Text {
+                            text: "Guardar Credenciales";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: touch_save.has-hover ? Theme.text-main : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                    }
+                    touch_save := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.save-credentials(root.client-id, root.client-secret); }
+                    }
+                }
+
+                Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: touch_login.has-hover ? Theme.accent-hover : Theme.accent;
+                    height: 32px;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        Text {
+                            text: root.is-logging-in ? "Esperando navegador..." : "🔑 Iniciar Sesión con Google";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: white;
+                            vertical-alignment: center;
+                        }
+                    }
+                    touch_login := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.login-oauth(); }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,149 @@
+import { Theme } from "../theme.slint";
+import { LogEntry } from "../models.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export component LogsView inherits VerticalLayout {
+    in property <[LogEntry]> logs: [];
+    in property <bool> is-loading: false;
+
+    callback refresh-logs();
+    callback clear-logs();
+
+    spacing: 16px;
+    padding: 24px;
+
+    // View Header
+    HorizontalLayout {
+        alignment: space-between;
+        VerticalLayout {
+            spacing: 4px;
+            Text {
+                text: "Registros del Servicio (Logs)";
+                font-size: 20px;
+                font-weight: 700;
+                color: Theme.text-main;
+            }
+            Text {
+                text: "Salida del registro de actividad de gdsyncd (systemd user unit).";
+                font-size: 13px;
+                color: Theme.text-secondary;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+
+            Rectangle {
+                border-radius: Theme.radius-sm;
+                background: touch_clear.has-hover ? Theme.bg-card-hover : Theme.bg-card;
+                border-width: 1px;
+                border-color: touch_clear.has-hover ? #ffffff2e : Theme.border-color;
+                height: 32px;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    Text {
+                        text: "Limpiar";
+                        font-size: 12px;
+                        font-weight: 500;
+                        color: touch_clear.has-hover ? Theme.text-main : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                }
+                touch_clear := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.clear-logs(); }
+                }
+            }
+
+            Rectangle {
+                border-radius: Theme.radius-sm;
+                background: touch_refresh.has-hover ? Theme.accent-hover : Theme.accent;
+                height: 32px;
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    spacing: 6px;
+                    Text { text: "🔄"; font-size: 12px; vertical-alignment: center; }
+                    Text {
+                        text: root.is-loading ? "Cargando..." : "Actualizar";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: white;
+                        vertical-alignment: center;
+                    }
+                }
+                touch_refresh := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.refresh-logs(); }
+                }
+            }
+        }
+    }
+
+    // Terminal Container
+    Rectangle {
+        background: #0d1117;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        clip: true;
+
+        ScrollView {
+            VerticalLayout {
+                padding: 16px;
+                spacing: 6px;
+
+                for log in root.logs: HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    Text {
+                        text: log.timestamp;
+                        font-family: "monospace";
+                        font-size: 11px;
+                        color: #6e7681;
+                        vertical-alignment: top;
+                    }
+
+                    Text {
+                        text: log.level;
+                        font-family: "monospace";
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: log.level-color;
+                        vertical-alignment: top;
+                    }
+
+                    Text {
+                        text: log.message;
+                        font-family: "monospace";
+                        font-size: 11px;
+                        color: #c9d1d9;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        vertical-alignment: top;
+                    }
+                }
+
+                if root.logs.length == 0: VerticalLayout {
+                    alignment: center;
+                    height: 160px;
+                    spacing: 8px;
+                    Text {
+                        text: "📜";
+                        font-size: 32px;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: "No hay registros disponibles en este momento.";
+                        font-family: "monospace";
+                        font-size: 12px;
+                        color: #6e7681;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

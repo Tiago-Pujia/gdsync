@@ -1,0 +1,57 @@
+export struct FileEntry {
+    id: string,
+    name: string,
+    location: string,
+    size_str: string,
+    mime: string,
+    is_folder: bool,
+    status: int, // 0: Folder, 1: Pinned, 2: Cached, 3: CloudOnly
+    status_text: string,
+    pinned: bool,
+    web_link: string,
+    visible: bool,
+}
+
+export struct QueueEntry {
+    id: int,
+    op: string,
+    file_id: string,
+    display_name: string,
+    size_str: string,
+    status: string,
+    is_failed: bool,
+    attempts: int,
+    created_str: string,
+    last_error: string,
+}
+
+export struct FolderNode {
+    id: string,
+    name: string,
+    checked: bool,
+}
+
+export struct PinnedItemEntry {
+    id: string,
+    name: string,
+    full_path: string,
+    is_folder: bool,
+    count_str: string,
+    size_str: string,
+    cache_str: string,
+    is_fully_cached: bool,
+    visible: bool,
+}
+
+export struct LogEntry {
+    timestamp: string,
+    level: string,
+    level_color: color,
+    message: string,
+}
+
+export struct ToastMessage {
+    title: string,
+    message: string,
+    is_warning: bool,
+}

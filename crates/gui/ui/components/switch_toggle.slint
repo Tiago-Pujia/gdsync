@@ -1,0 +1,35 @@
+import { Theme } from "../theme.slint";
+
+export component SwitchToggle inherits Rectangle {
+    in-out property <bool> checked: false;
+    callback toggled(bool);
+
+    width: 44px;
+    height: 24px;
+    border-radius: 12px;
+    background: checked ? Theme.accent : Theme.bg-surface-hover;
+    border-width: 1px;
+    border-color: checked ? Theme.accent : Theme.border-color;
+
+    animate background { duration: 150ms; }
+    animate border-color { duration: 150ms; }
+
+    Rectangle {
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: #ffffff;
+        x: root.checked ? (parent.width - self.width - 3px) : 3px;
+        y: (parent.height - self.height) / 2;
+
+        animate x { duration: 150ms; easing: ease-out; }
+    }
+
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}

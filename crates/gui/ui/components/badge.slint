@@ -1,0 +1,24 @@
+import { Theme } from "../theme.slint";
+
+export component Badge inherits Rectangle {
+    in property <string> text: "Offline";
+    in property <color> badge-color: Theme.success;
+    in property <color> badge-bg: Theme.success.transparentize(0.85);
+
+    border-radius: Theme.radius-sm;
+    background: root.badge-bg;
+    height: 22px;
+
+    HorizontalLayout {
+        alignment: center;
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
+            text: root.text;
+            color: root.badge-color;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}

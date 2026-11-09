@@ -1,0 +1,314 @@
+import { Theme } from "../theme.slint";
+
+export component Sidebar inherits Rectangle {
+    in-out property <int> active-tab: 0;
+    in property <int> total-files-count: 0;
+    in property <int> pending-queue-count: 0;
+    in property <float> storage-pct: 0.76;
+    in property <string> storage-desc: "11.4 GB de 15.0 GB usados";
+
+    callback tab-selected(int);
+
+    width: 220px;
+    background: Theme.bg-sidebar;
+    border-width: 1px;
+    border-color: Theme.border-color;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 14px;
+        alignment: space-between;
+
+        VerticalLayout {
+            spacing: 4px;
+
+            // Group 1 Title
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-bottom: 4px;
+                Text {
+                    text: "SINCRONIZACIÓN";
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: Theme.text-muted;
+                }
+            }
+
+            // Tab 0: Resumen
+            Rectangle {
+                height: 36px;
+                border-radius: Theme.radius-md;
+                background: root.active-tab == 0 ? Theme.accent : (touch0.has-hover ? Theme.bg-surface-hover : Colors.transparent);
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 10px;
+                    alignment: start;
+                    Text { text: "📊"; font-size: 14px; vertical-alignment: center; }
+                    Text {
+                        text: "Resumen";
+                        font-size: 13px;
+                        font-weight: 500;
+                        color: root.active-tab == 0 ? white : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                }
+                touch0 := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.tab-selected(0); }
+                }
+            }
+
+            // Tab 1: Explorador
+            Rectangle {
+                height: 36px;
+                border-radius: Theme.radius-md;
+                background: root.active-tab == 1 ? Theme.accent : (touch1.has-hover ? Theme.bg-surface-hover : Colors.transparent);
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 10px;
+                    alignment: space-between;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "📁"; font-size: 14px; vertical-alignment: center; }
+                        Text {
+                            text: "Explorador";
+                            font-size: 13px;
+                            font-weight: 500;
+                            color: root.active-tab == 1 ? white : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if root.total-files-count > 0 : Rectangle {
+                        border-radius: 10px;
+                        background: root.active-tab == 1 ? #ffffff33 : Theme.bg-surface;
+                        height: 20px;
+                        y: (parent.height - self.height) / 2;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            alignment: center;
+                            Text {
+                                text: root.total-files-count > 999 ? "1k+" : "\{root.total-files-count}";
+                                font-size: 11px;
+                                font-weight: 600;
+                                color: root.active-tab == 1 ? white : Theme.text-muted;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                touch1 := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.tab-selected(1); }
+                }
+            }
+
+            // Tab 2: Cola en Vivo
+            Rectangle {
+                height: 36px;
+                border-radius: Theme.radius-md;
+                background: root.active-tab == 2 ? Theme.accent : (touch2.has-hover ? Theme.bg-surface-hover : Colors.transparent);
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 10px;
+                    alignment: space-between;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "📤"; font-size: 14px; vertical-alignment: center; }
+                        Text {
+                            text: "Cola en Vivo";
+                            font-size: 13px;
+                            font-weight: 500;
+                            color: root.active-tab == 2 ? white : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if root.pending-queue-count > 0 : Rectangle {
+                        border-radius: 10px;
+                        background: root.active-tab == 2 ? #ffffff33 : Theme.accent.transparentize(0.85);
+                        height: 20px;
+                        y: (parent.height - self.height) / 2;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            alignment: center;
+                            Text {
+                                text: "\{root.pending-queue-count}";
+                                font-size: 11px;
+                                font-weight: 600;
+                                color: root.active-tab == 2 ? white : Theme.accent;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                touch2 := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.tab-selected(2); }
+                }
+            }
+
+            // Tab 3: Carpetas Selectivas
+            Rectangle {
+                height: 36px;
+                border-radius: Theme.radius-md;
+                background: root.active-tab == 3 ? Theme.accent : (touch3.has-hover ? Theme.bg-surface-hover : Colors.transparent);
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 10px;
+                    alignment: start;
+                    Text { text: "🗂️"; font-size: 14px; vertical-alignment: center; }
+                    Text {
+                        text: "Carpetas Selectivas";
+                        font-size: 13px;
+                        font-weight: 500;
+                        color: root.active-tab == 3 ? white : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                }
+                touch3 := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.tab-selected(3); }
+                }
+            }
+
+            // Group 2 Title
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-top: 14px;
+                padding-bottom: 4px;
+                Text {
+                    text: "CONFIGURACIÓN";
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: Theme.text-muted;
+                }
+            }
+
+            // Tab 4: Cuenta
+            Rectangle {
+                height: 36px;
+                border-radius: Theme.radius-md;
+                background: root.active-tab == 4 ? Theme.accent : (touch4.has-hover ? Theme.bg-surface-hover : Colors.transparent);
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 10px;
+                    alignment: start;
+                    Text { text: "👤"; font-size: 14px; vertical-alignment: center; }
+                    Text {
+                        text: "Cuenta & Google";
+                        font-size: 13px;
+                        font-weight: 500;
+                        color: root.active-tab == 4 ? white : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                }
+                touch4 := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.tab-selected(4); }
+                }
+            }
+
+            // Tab 5: Preferencias
+            Rectangle {
+                height: 36px;
+                border-radius: Theme.radius-md;
+                background: root.active-tab == 5 ? Theme.accent : (touch5.has-hover ? Theme.bg-surface-hover : Colors.transparent);
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 10px;
+                    alignment: start;
+                    Text { text: "⚙️"; font-size: 14px; vertical-alignment: center; }
+                    Text {
+                        text: "Preferencias";
+                        font-size: 13px;
+                        font-weight: 500;
+                        color: root.active-tab == 5 ? white : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                }
+                touch5 := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.tab-selected(5); }
+                }
+            }
+
+            // Tab 6: Registros
+            Rectangle {
+                height: 36px;
+                border-radius: Theme.radius-md;
+                background: root.active-tab == 6 ? Theme.accent : (touch6.has-hover ? Theme.bg-surface-hover : Colors.transparent);
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 10px;
+                    alignment: start;
+                    Text { text: "📜"; font-size: 14px; vertical-alignment: center; }
+                    Text {
+                        text: "Registros (Logs)";
+                        font-size: 13px;
+                        font-weight: 500;
+                        color: root.active-tab == 6 ? white : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                }
+                touch6 := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.tab-selected(6); }
+                }
+            }
+        }
+
+        // Footer: Storage Mini Widget
+        Rectangle {
+            background: Theme.bg-card;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Theme.border-color;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 6px;
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Google Drive";
+                        font-size: 11px;
+                        font-weight: 600;
+                        color: Theme.text-secondary;
+                    }
+                    Text {
+                        text: "\{Math.round(root.storage-pct * 100)}%";
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: Theme.accent;
+                    }
+                }
+                // Progress bar
+                Rectangle {
+                    height: 6px;
+                    background: Theme.bg-surface;
+                    border-radius: 3px;
+                    clip: true;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * Math.min(1.0, root.storage-pct);
+                        background: Theme.accent;
+                        border-radius: 3px;
+                    }
+                }
+                Text {
+                    text: root.storage-desc;
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                }
+            }
+        }
+    }
+}

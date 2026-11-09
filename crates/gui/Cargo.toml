@@ -1,0 +1,31 @@
+[package]
+name = "gdsync-gui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "gdsync-gui"
+path = "src/main.rs"
+
+[dependencies]
+gdsync-core.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+slint = { version = "1", default-features = false, features = [
+    "std",
+    "compat-1-18",
+    "backend-winit",
+    "renderer-femtovg",
+    "renderer-software",
+] }
+ksni = "0.3"
+rfd = "0.15"
+arboard = "3"
+
+[build-dependencies]
+slint-build = { version = "1", features = ["compat-1-18"] }
