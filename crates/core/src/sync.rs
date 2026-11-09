@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::drive::{Drive, FOLDER_MIME};
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{debug, info};
 
 const PAGE_TOKEN: &str = "page_token";
 
@@ -97,13 +97,26 @@ pub async fn poll_changes(drive: &Drive, db: &Db, cache: &Cache, cfg: &Config) -
 }
 
 /// Processes pending items in the upload queue (submitting local creates, edits, renames, deletes).
-pub async fn process_upload_queue(drive: &Drive, db: &Db, cache: &Cache) -> Result<usize> {
+pub async fn process_upload_queue<F>(
+    drive: &Drive,
+    db: &Db,
+    cache: &Cache,
+    is_busy: F,
+) -> Result<usize>
+where
+    F: Fn(&str) -> bool,
+{
     let tasks = db.peek_pending_uploads(10)?;
     if tasks.is_empty() {
         return Ok(0);
     }
     let mut done = 0;
     for task in tasks {
+        if (task.op == "create" || task.op == "update") && is_busy(&task.file_id) {
+            debug!("posponiendo subida de '{}' (op: {}) porque el archivo sigue abierto para escritura", task.file_id, task.op);
+            continue;
+        }
+
         let res: Result<()> = async {
             match task.op.as_str() {
                 "create" => {

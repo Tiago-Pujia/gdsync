@@ -8,9 +8,10 @@ use gdsync_core::config::{cache_dir, db_path, Config};
 use gdsync_core::db::Db;
 use gdsync_core::drive::Drive;
 use gdsync_core::sync;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -67,12 +68,21 @@ fn main() -> Result<()> {
     rt.block_on(sync::initial_sync(&drive, &db, &cfg))?;
 
     let upload_notify = Arc::new(tokio::sync::Notify::new());
+    let handles: Arc<Mutex<HashMap<u64, fs::OpenFile>>> = Arc::default();
 
     // Background worker: upload queue + remote changes polling + quota refresh
     {
         let (drive, db, cache, cfg_clone) = (drive.clone(), db.clone(), cache.clone(), cfg.clone());
         let (total_s, used_s) = (total_space.clone(), used_space.clone());
         let upload_notify = upload_notify.clone();
+        let handles_worker = handles.clone();
+        let is_busy = move |file_id: &str| {
+            let h = handles_worker.lock().unwrap();
+            h.values().any(|f| match f {
+                fs::OpenFile::DiskRw { item_id, .. } => item_id == file_id,
+                _ => false,
+            })
+        };
         let mut sigusr1 = rt.block_on(async {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
         })?;
@@ -102,7 +112,7 @@ fn main() -> Result<()> {
                 // 1. Process pending local uploads first (drain queue continuously)
                 let mut total_uploaded = 0;
                 loop {
-                    match sync::process_upload_queue(&drive, &db, &cache).await {
+                    match sync::process_upload_queue(&drive, &db, &cache, &is_busy).await {
                         Ok(0) => break,
                         Ok(n) => {
                             total_uploaded += n;
@@ -168,7 +178,7 @@ fn main() -> Result<()> {
         MountOption::NoAtime,
         MountOption::DefaultPermissions,
     ];
-    let fs = fs::DriveFs::new(db, cache, rt.handle().clone(), total_space, used_space, upload_notify);
+    let fs = fs::DriveFs::new(db, cache, rt.handle().clone(), total_space, used_space, upload_notify, handles);
     let session = fuser::spawn_mount2(fs, &mount, &options)
         .with_context(|| format!("no se pudo montar en {}", mount.display()))?;
     info!("Google Drive montado en modo lectura/escritura en {}", mount.display());

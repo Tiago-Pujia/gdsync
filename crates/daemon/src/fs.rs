@@ -21,7 +21,7 @@ use tracing::{debug, warn};
 
 const TTL: Duration = Duration::from_secs(1);
 
-enum OpenFile {
+pub enum OpenFile {
     Disk(File),
     DiskRw { file: File, item_id: String, dirty: bool },
     Mem(Vec<u8>),
@@ -48,6 +48,7 @@ impl DriveFs {
         total_space: Arc<AtomicU64>,
         used_space: Arc<AtomicU64>,
         notify_upload: Arc<tokio::sync::Notify>,
+        handles: Arc<Mutex<HashMap<u64, OpenFile>>>,
     ) -> Self {
         // SAFETY: getuid/getgid have no preconditions.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
@@ -55,7 +56,7 @@ impl DriveFs {
             db,
             cache,
             rt,
-            handles: Arc::default(),
+            handles,
             next_fh: Arc::new(AtomicU64::new(1)),
             uid,
             gid,
@@ -66,10 +67,8 @@ impl DriveFs {
     }
 
     fn enqueue(&self, file_id: &str, op: &str, payload: Option<&str>) {
-        if let Ok(id) = self.db.enqueue_upload(file_id, op, payload) {
-            if id > 0 {
-                self.notify_upload.notify_one();
-            }
+        if let Ok(_) = self.db.enqueue_upload(file_id, op, payload) {
+            self.notify_upload.notify_one();
         }
     }
 
@@ -200,17 +199,36 @@ impl Filesystem for DriveFs {
         let Some(item) = self.item(ino) else { return reply.error(ENOENT) };
         if let Some(new_size) = size {
             let path = self.cache.path(&item.id);
-            if let Some(h) = fh {
-                let handles = self.handles.lock().unwrap();
-                if let Some(OpenFile::DiskRw { file, .. }) = handles.get(&h) {
-                    let _ = file.set_len(new_size);
+            let has_open_writer = {
+                let mut handles = self.handles.lock().unwrap();
+                let mut found = false;
+                if let Some(h) = fh {
+                    if let Some(OpenFile::DiskRw { file, dirty, .. }) = handles.get_mut(&h) {
+                        let _ = file.set_len(new_size);
+                        *dirty = true;
+                        found = true;
+                    }
                 }
-            } else if path.exists() {
-                let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_len(new_size));
-            }
+                if !found {
+                    for handle in handles.values_mut() {
+                        if let OpenFile::DiskRw { item_id, file, dirty } = handle {
+                            if item_id == &item.id {
+                                let _ = file.set_len(new_size);
+                                *dirty = true;
+                                found = true;
+                            }
+                        }
+                    }
+                }
+                if !found && path.exists() {
+                    let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_len(new_size));
+                }
+                found
+            };
             let _ = self.db.update_item_size_mtime(&item.id, new_size, gdsync_core::now());
-            if !is_temp_file(&item.name) {
-                self.enqueue(&item.id, "update", None);
+            if !has_open_writer && !is_temp_file(&item.name) {
+                let op = if item.id.starts_with("local_") { "create" } else { "update" };
+                self.enqueue(&item.id, op, None);
             }
         }
         let updated = self.item(ino).unwrap_or(item);
@@ -326,11 +344,6 @@ impl Filesystem for DriveFs {
         };
         let Some(created_item) = self.item(ino) else { return reply.error(EIO) };
         let _ = self.db.cache_put(&local_id, &created_item.version(), 0);
-        if !is_temp_file(&name_str) {
-            self.enqueue(&local_id, "create", None);
-        } else {
-            debug!("archivo temporal local ignorado para subida: {name_str}");
-        }
 
         let fh = self.new_handle(OpenFile::DiskRw { file, item_id: local_id.clone(), dirty: true });
         reply.created(&TTL, &self.attr(&created_item), 0, fh, 0);
@@ -416,16 +429,10 @@ impl Filesystem for DriveFs {
         }
     }
 
-    fn flush(&mut self, _req: &Request<'_>, ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
-        let is_temp = self.item(ino).map(|i| is_temp_file(&i.name)).unwrap_or(false);
+    fn flush(&mut self, _req: &Request<'_>, _ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
         let mut handles = self.handles.lock().unwrap();
-        if let Some(OpenFile::DiskRw { item_id, dirty, .. }) = handles.get_mut(&fh) {
-            if *dirty {
-                if !is_temp {
-                    self.enqueue(item_id, "update", None);
-                }
-                *dirty = false;
-            }
+        if let Some(OpenFile::DiskRw { file, .. }) = handles.get_mut(&fh) {
+            let _ = file.sync_data();
         }
         reply.ok();
     }
@@ -442,9 +449,22 @@ impl Filesystem for DriveFs {
     ) {
         let is_temp = self.item(ino).map(|i| is_temp_file(&i.name)).unwrap_or(false);
         let mut handles = self.handles.lock().unwrap();
-        if let Some(OpenFile::DiskRw { item_id, dirty, .. }) = handles.remove(&fh) {
+        if let Some(OpenFile::DiskRw { file, item_id, dirty }) = handles.remove(&fh) {
             if dirty && !is_temp {
-                self.enqueue(&item_id, "update", None);
+                let still_open = handles.values().any(|h| match h {
+                    OpenFile::DiskRw { item_id: other_id, .. } => other_id == &item_id,
+                    _ => false,
+                });
+                let actual_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                let _ = self.db.update_item_size_mtime(&item_id, actual_size, gdsync_core::now());
+                if !still_open {
+                    let op = if item_id.starts_with("local_") {
+                        "create"
+                    } else {
+                        "update"
+                    };
+                    self.enqueue(&item_id, op, None);
+                }
             }
         }
         reply.ok();
@@ -567,6 +587,16 @@ impl Filesystem for DriveFs {
                 let _ = std::fs::rename(self.cache.path(&item.id), self.cache.path(&existing.id));
                 let _ = self.db.cache_put(&existing.id, &format!("mtime:{now}"), file_size);
                 let _ = self.db.cancel_uploads(&item.id);
+                {
+                    let mut handles = self.handles.lock().unwrap();
+                    for handle in handles.values_mut() {
+                        if let OpenFile::DiskRw { item_id: hid, .. } = handle {
+                            if hid == &item.id {
+                                *hid = existing.id.clone();
+                            }
+                        }
+                    }
+                }
                 if !is_temp_file(&newname_str) {
                     self.enqueue(&existing.id, "update", None);
                 }
