@@ -178,7 +178,7 @@ fn main() -> Result<()> {
         MountOption::NoAtime,
         MountOption::DefaultPermissions,
     ];
-    let fs = fs::DriveFs::new(db, cache, rt.handle().clone(), total_space, used_space, upload_notify, handles);
+    let fs = fs::DriveFs::new(db, cache, rt.handle().clone(), total_space, used_space, upload_notify, handles, mount.clone());
     let session = fuser::spawn_mount2(fs, &mount, &options)
         .with_context(|| format!("no se pudo montar en {}", mount.display()))?;
     info!("Google Drive montado en modo lectura/escritura en {}", mount.display());

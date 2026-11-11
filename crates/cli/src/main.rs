@@ -81,6 +81,34 @@ enum Cmd {
         #[arg(required = true, value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
+    /// Crea un enlace simbólico relativo o acceso directo compatible con Google Drive y Linux.
+    #[command(name = "symlink", alias = "shortcut")]
+    Symlink {
+        /// Destino donde se creará el enlace (si se omite, se solicita o se usa el mismo directorio)
+        #[arg(short, long)]
+        dest: Option<PathBuf>,
+        /// Ruta(s) al archivo o carpeta
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
+    },
+    /// Muestra información detallada y estado de sincronización del archivo o carpeta.
+    Info {
+        /// Ruta(s) al archivo o carpeta
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
+    },
+    /// Abre el gestor de permisos y compartir en Google Drive Web y copia el enlace.
+    Share {
+        /// Ruta(s) al archivo o carpeta
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
+    },
+    /// Abre el historial de versiones o revisiones del elemento en Google Drive Web.
+    History {
+        /// Ruta(s) al archivo o carpeta
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
+    },
     /// Lista las carpetas padre y archivos sueltos disponibles sin conexión.
     #[command(visible_alias = "offline")]
     Pinned,
@@ -660,6 +688,326 @@ async fn main() -> Result<()> {
             }
         }
 
+        Cmd::Symlink { dest, paths } => {
+            let cfg = Config::load()?;
+            let db = Db::open(&db_path())?;
+            for path in paths {
+                let item = match resolve_item_from_input_path(&cfg, &db, &path) {
+                    Ok(it) => it,
+                    Err(e) => {
+                        eprintln!("! {e}");
+                        continue;
+                    }
+                };
+
+                let parent_dir = path.parent().unwrap_or(&cfg.mount_point).to_path_buf();
+                let target_dest_dir = dest
+                    .clone()
+                    .or_else(|| pick_directory_dialog(&parent_dir))
+                    .unwrap_or(parent_dir);
+
+                let clean_dest = clean_input_path(&target_dest_dir);
+
+                if clean_dest.starts_with(&cfg.mount_point) {
+                    let dest_item = match resolve_item_from_input_path(&cfg, &db, &clean_dest) {
+                        Ok(it) => it,
+                        Err(e) => {
+                            eprintln!("! Destino en Google Drive no válido: {e}");
+                            continue;
+                        }
+                    };
+
+                    let parent_id = if dest_item.is_dir() {
+                        dest_item.id.clone()
+                    } else {
+                        dest_item.parent_id.unwrap_or_else(|| "root".into())
+                    };
+
+                    let target_id = if item.is_shortcut() {
+                        item.shortcut_target_id().unwrap_or(item.id.clone())
+                    } else {
+                        item.id.clone()
+                    };
+
+                    let shortcut_name = format!("Atajo a {}", item.name);
+                    let rand_id: u64 = rand::random();
+                    let local_id = format!("local_shortcut_{rand_id:016x}");
+                    let now = gdsync_core::now();
+
+                    let _ = db.insert_local_item(
+                        &local_id,
+                        Some(&parent_id),
+                        &shortcut_name,
+                        gdsync_core::drive::SHORTCUT_MIME,
+                        0,
+                        now,
+                    );
+                    let _ = db.kv_set(&format!("link_{local_id}"), &format!("https://drive.google.com/open?id={target_id}"));
+
+                    let payload = serde_json::json!({ "target_id": target_id }).to_string();
+                    let _ = db.enqueue_upload(&local_id, "shortcut", Some(&payload));
+
+                    let _ = std::process::Command::new("pkill")
+                        .args(["-USR1", "-x", "gdsyncd"])
+                        .status();
+
+                    println!("✓ Acceso directo creado en Google Drive: '{}' en {}", shortcut_name, clean_dest.display());
+                    notify_desktop(
+                        "Google Drive",
+                        &format!("✓ Acceso directo creado en Google Drive:\n'{}'", shortcut_name),
+                        "emblem-symbolic-link",
+                    );
+                } else {
+                    let source_path = clean_input_path(&path);
+                    let mut link_path = clean_dest.join(format!("Atajo a {}", item.name));
+                    if link_path.exists() {
+                        let mut n = 2;
+                        while clean_dest.join(format!("Atajo a {} ({n})", item.name)).exists() {
+                            n += 1;
+                        }
+                        link_path = clean_dest.join(format!("Atajo a {} ({n})", item.name));
+                    }
+
+                    match std::os::unix::fs::symlink(&source_path, &link_path) {
+                        Ok(_) => {
+                            println!("✓ Enlace simbólico creado: {}", link_path.display());
+                            notify_desktop(
+                                "Google Drive",
+                                &format!("✓ Enlace simbólico creado:\n{}", link_path.display()),
+                                "emblem-symbolic-link",
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("! Error creando enlace simbólico: {e}");
+                            notify_desktop("Google Drive", &format!("No se pudo crear el enlace: {e}"), "dialog-warning");
+                        }
+                    }
+                }
+            }
+        }
+
+        Cmd::Info { paths } => {
+            let cfg = Config::load()?;
+            let db = Db::open(&db_path())?;
+            for path in paths {
+                let item = match resolve_item_from_input_path(&cfg, &db, &path) {
+                    Ok(it) => it,
+                    Err(e) => {
+                        eprintln!("! {e}");
+                        continue;
+                    }
+                };
+
+                let tipo = if item.is_dir() {
+                    "📁 Carpeta".to_string()
+                } else if item.is_shortcut() {
+                    "🔗 Acceso directo (Google Drive Shortcut)".to_string()
+                } else if item.is_google_doc() {
+                    "📄 Documento de Google (Docs/Sheets/Slides)".to_string()
+                } else {
+                    "📄 Archivo estándar".to_string()
+                };
+
+                let cache_status = if item.is_dir() {
+                    "N/A (carpeta)".to_string()
+                } else if db.cache_version(&item.id)?.is_some() {
+                    "✅ En caché local (disponible sin conexión)".to_string()
+                } else {
+                    "☁️ Solo en la nube (se descargará al abrir)".to_string()
+                };
+
+                let pin_status = if item.pinned {
+                    "📌 Mantener siempre en este equipo (Anclado)".to_string()
+                } else {
+                    "☁️ Liberable de la caché (Automático)".to_string()
+                };
+
+                let sync_status = match db.pending_task_for_file(&item.id)? {
+                    Some(t) if t.status == "failed" => format!("⚠️ Error al subir ({:?})", t.last_error),
+                    Some(t) => format!("⏳ En cola para subida (operación: {})", t.op),
+                    None => "✅ Sincronizado con Google Drive".to_string(),
+                };
+
+                let rel_path_str = db
+                    .resolve_item_relative_path(&item.id)?
+                    .map(|p| cfg.mount_point.join(p).display().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+
+                let mut extra = String::new();
+                if item.is_shortcut() {
+                    if let Some(target_id) = item.shortcut_target_id() {
+                        let target_exists = db.by_id(&target_id)?.is_some();
+                        extra = format!(
+                            "\nDestino:        ID {}\nExiste local:   {}",
+                            target_id,
+                            if target_exists { "Sí (sincronizado)" } else { "No (abrirá en navegador)" }
+                        );
+                    }
+                }
+
+                let info_text = format!(
+                    "=== Información de Google Drive (gdsync) ===\n\
+                    Nombre:         {}\n\
+                    Tipo:           {}\n\
+                    ID de Drive:    {}\n\
+                    Ruta local:     {}\n\
+                    Tamaño:         {}\n\
+                    Disponibilidad: {}\n\
+                    Estado caché:   {}\n\
+                    Sincronización: {}{}",
+                    item.name,
+                    tipo,
+                    item.id,
+                    rel_path_str,
+                    format_size(item.size),
+                    pin_status,
+                    cache_status,
+                    sync_status,
+                    extra,
+                );
+
+                println!("{info_text}");
+                show_info_dialog("Google Drive (gdsync) - Información", &info_text);
+            }
+        }
+
+        Cmd::Share { paths } => {
+            let cfg = Config::load()?;
+            let db = Db::open(&db_path())?;
+            let drive_res = Drive::new(cfg.clone());
+
+            for path in paths {
+                let item = match resolve_item_from_input_path(&cfg, &db, &path) {
+                    Ok(it) => it,
+                    Err(e) => {
+                        eprintln!("! {e}");
+                        continue;
+                    }
+                };
+                let target_id = if item.is_shortcut() {
+                    item.shortcut_target_id().unwrap_or(item.id.clone())
+                } else {
+                    item.id.clone()
+                };
+
+                let url = if item.is_dir() {
+                    format!("https://drive.google.com/drive/folders/{target_id}")
+                } else {
+                    format!("https://drive.google.com/file/d/{target_id}/view")
+                };
+
+                println!("=== Compartir y gestionar permisos: {} ===", item.name);
+                println!("ID: {}", target_id);
+                println!("Enlace: {url}");
+                if copy_to_clipboard(&url) {
+                    println!("✓ Enlace copiado al portapapeles.");
+                }
+
+                // 1. Try to open native GUI modal via IPC or spawn gdsync-gui
+                let gui_socket = if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+                    PathBuf::from(runtime_dir).join("gdsync_gui.sock")
+                } else {
+                    let uid = unsafe { libc::getuid() };
+                    PathBuf::from(format!("/tmp/gdsync_gui_{}.sock", uid))
+                };
+
+                let mut gui_opened = false;
+                if gui_socket.exists() {
+                    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&gui_socket) {
+                        use std::io::Write;
+                        let msg = format!("SHARE {}\n", target_id);
+                        if stream.write_all(msg.as_bytes()).is_ok() && stream.flush().is_ok() {
+                            println!("✓ Abriendo ventana de permisos en gdsync...");
+                            gui_opened = true;
+                        }
+                    }
+                }
+
+                if !gui_opened && (std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok()) {
+                    if let Ok(_) = std::process::Command::new("gdsync-gui")
+                        .arg("--share")
+                        .arg(&target_id)
+                        .spawn()
+                    {
+                        println!("✓ Iniciando gdsync y abriendo ventana de permisos...");
+                        gui_opened = true;
+                    }
+                }
+
+                if !gui_opened {
+                    println!("(Interfaz gráfica no iniciada. Podés gestionar los permisos vía web o gdsync-gui)");
+                }
+
+                // 2. Also print current permissions in terminal if possible
+                if let Ok(ref drive) = drive_res {
+                    match drive.list_permissions(&target_id).await {
+                        Ok(perms) => {
+                            println!("\nPersonas con acceso ({}):", perms.len());
+                            for p in perms {
+                                let who = p.display_name.as_deref().unwrap_or_else(|| {
+                                    if p.perm_type == "anyone" {
+                                        "Cualquier persona con el enlace"
+                                    } else {
+                                        p.email_address.as_deref().unwrap_or("Usuario")
+                                    }
+                                });
+                                let email = p.email_address.as_deref().map(|e| format!(" <{e}>")).unwrap_or_default();
+                                println!("  - {who}{email} [{}] ({})", p.role, p.perm_type);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("! No se pudieron listar los permisos vía API: {e}");
+                        }
+                    }
+                }
+
+                notify_desktop(
+                    "Google Drive",
+                    &format!("Gestionar permisos: {}", item.name),
+                    "document-share",
+                );
+            }
+        }
+
+        Cmd::History { paths } => {
+            let cfg = Config::load()?;
+            let db = Db::open(&db_path())?;
+            for path in paths {
+                let item = match resolve_item_from_input_path(&cfg, &db, &path) {
+                    Ok(it) => it,
+                    Err(e) => {
+                        eprintln!("! {e}");
+                        continue;
+                    }
+                };
+                let target_id = if item.is_shortcut() {
+                    item.shortcut_target_id().unwrap_or(item.id.clone())
+                } else {
+                    item.id.clone()
+                };
+
+                let url = if item.mime.contains("document") {
+                    format!("https://docs.google.com/document/d/{target_id}/revisions")
+                } else if item.mime.contains("spreadsheet") {
+                    format!("https://docs.google.com/spreadsheets/d/{target_id}/revisions")
+                } else if item.mime.contains("presentation") {
+                    format!("https://docs.google.com/presentation/d/{target_id}/revisions")
+                } else if item.is_dir() {
+                    format!("https://drive.google.com/drive/folders/{target_id}")
+                } else {
+                    format!("https://drive.google.com/file/d/{target_id}/view")
+                };
+
+                println!("Abriendo historial de versiones en el navegador: {url}");
+                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                notify_desktop(
+                    "Google Drive",
+                    &format!("Abriendo historial de versiones en el navegador:\n{}", item.name),
+                    "view-history",
+                );
+            }
+        }
+
         Cmd::Gui { minimized, tray, args } => {
             let mut candidates = vec![
                 PathBuf::from("target/release/gdsync-gui"),
@@ -898,18 +1246,56 @@ fn notify_desktop(title: &str, message: &str, icon: &str) {
         .spawn();
 }
 
-fn resolve_item_from_input_path(cfg: &Config, db: &Db, raw_path: &Path) -> Result<Item> {
-    let path = clean_input_path(raw_path);
-    let rel = if path.is_absolute() {
-        if let Ok(r) = path.strip_prefix(&cfg.mount_point) {
-            r
-        } else {
-            &path
+fn show_info_dialog(title: &str, text: &str) {
+    if std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok() {
+        if let Ok(mut child) = std::process::Command::new("kdialog")
+            .args(["--title", title, "--msgbox", text])
+            .spawn()
+        {
+            let _ = child.wait();
+            return;
         }
-    } else {
-        &path
-    };
-    db.resolve_relative_path(rel)?
+        if let Ok(mut child) = std::process::Command::new("zenity")
+            .args(["--info", &format!("--title={title}"), &format!("--text={text}")])
+            .spawn()
+        {
+            let _ = child.wait();
+            return;
+        }
+    }
+    notify_desktop(title, text, "dialog-information");
+}
+
+fn pick_directory_dialog(start_dir: &Path) -> Option<PathBuf> {
+    if std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok() {
+        if let Ok(output) = std::process::Command::new("kdialog")
+            .args(["--getexistingdirectory", &start_dir.to_string_lossy(), "Seleccionar carpeta destino para el acceso directo"])
+            .output()
+        {
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(clean_input_path(Path::new(&s)));
+                }
+            }
+        }
+        if let Ok(output) = std::process::Command::new("zenity")
+            .args(["--file-selection", "--directory", "--title=Seleccionar carpeta destino"])
+            .output()
+        {
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(clean_input_path(Path::new(&s)));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve_item_from_input_path(cfg: &Config, db: &Db, raw_path: &Path) -> Result<Item> {
+    db.resolve_path_or_id(&cfg.mount_point, &raw_path.to_string_lossy())?
         .with_context(|| format!("no se encontró '{}' en Google Drive local", raw_path.display()))
 }
 

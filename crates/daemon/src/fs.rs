@@ -7,12 +7,13 @@ use fuser::{
 use gdsync_core::cache::Cache;
 use gdsync_core::db::{Db, Item, ROOT_INO};
 use gdsync_core::drive::FOLDER_MIME;
-use gdsync_core::names::{desktop_link, is_temp_file, local_entries};
+use gdsync_core::names::{desktop_link_resolved, is_temp_file, local_entries};
 use libc::{EACCES, EBADF, EEXIST, EIO, EISDIR, ENODATA, ENOENT, ENOTDIR, ENOTEMPTY, ERANGE};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
@@ -38,6 +39,7 @@ pub struct DriveFs {
     total_space: Arc<AtomicU64>,
     used_space: Arc<AtomicU64>,
     notify_upload: Arc<tokio::sync::Notify>,
+    mount_point: PathBuf,
 }
 
 impl DriveFs {
@@ -49,6 +51,7 @@ impl DriveFs {
         used_space: Arc<AtomicU64>,
         notify_upload: Arc<tokio::sync::Notify>,
         handles: Arc<Mutex<HashMap<u64, OpenFile>>>,
+        mount_point: PathBuf,
     ) -> Self {
         // SAFETY: getuid/getgid have no preconditions.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
@@ -63,6 +66,7 @@ impl DriveFs {
             total_space,
             used_space,
             notify_upload,
+            mount_point,
         }
     }
 
@@ -76,7 +80,8 @@ impl DriveFs {
         let (kind, perm, size) = if item.is_dir() {
             (FileType::Directory, 0o755, 0)
         } else if item.is_google_doc() {
-            (FileType::RegularFile, 0o644, desktop_link(item).len() as u64)
+            let content = desktop_link_resolved(item, &self.db, &self.mount_point);
+            (FileType::RegularFile, 0o644, content.len() as u64)
         } else {
             (FileType::RegularFile, 0o644, item.size)
         };
@@ -264,7 +269,8 @@ impl Filesystem for DriveFs {
             return reply.error(EISDIR);
         }
         if item.is_google_doc() {
-            let fh = self.new_handle(OpenFile::Mem(desktop_link(&item).into_bytes()));
+            let content = desktop_link_resolved(&item, &self.db, &self.mount_point);
+            let fh = self.new_handle(OpenFile::Mem(content.into_bytes()));
             return reply.opened(fh, 0);
         }
 

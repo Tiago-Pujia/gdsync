@@ -188,6 +188,34 @@ where
                     db.complete_upload(task.id)?;
                     done += 1;
                 }
+                "shortcut" => {
+                    let Some(item) = db.by_id(&task.file_id)? else {
+                        info!("acceso directo local '{}' fue eliminado antes de crear; descartando tarea #{}", task.file_id, task.id);
+                        db.complete_upload(task.id)?;
+                        done += 1;
+                        return Ok(());
+                    };
+                    let parent_id = item.parent_id.as_deref().unwrap_or("root");
+                    if parent_id.starts_with("local_") {
+                        anyhow::bail!("esperando a que el directorio padre '{}' se cree en Drive antes de crear atajo '{}'", parent_id, item.name);
+                    }
+                    let target_id = task.payload.as_deref().and_then(|p| {
+                        serde_json::from_str::<serde_json::Value>(p)
+                            .ok()
+                            .and_then(|v| v.get("target_id").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                    }).or_else(|| item.shortcut_target_id());
+
+                    let Some(target_id) = target_id else {
+                        anyhow::bail!("tarea de atajo #{} no contiene target_id válido", task.id);
+                    };
+
+                    info!("creando acceso directo remoto '{}' apuntando a '{}'", item.name, target_id);
+                    let remote = drive.create_remote_shortcut(&item.name, parent_id, &target_id).await?;
+                    let mtime = remote.modified_time.as_deref().and_then(crate::db::parse_rfc3339).unwrap_or(0);
+                    db.replace_file_id(&task.file_id, &remote.id, None, mtime)?;
+                    db.complete_upload(task.id)?;
+                    done += 1;
+                }
                 "trash" => {
                     info!("enviando a la papelera '{}'", task.file_id);
                     if !task.file_id.starts_with("local_") {

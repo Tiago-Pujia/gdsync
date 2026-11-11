@@ -1,0 +1,530 @@
+import { Theme } from "../theme.slint";
+import { Badge } from "../components/badge.slint";
+import { PermissionEntry } from "../models.slint";
+import { ListView } from "std-widgets.slint";
+
+export component ShareModal inherits Rectangle {
+    in property <bool> is-open: false;
+    in property <string> file-id: "";
+    in property <string> file-name: "";
+    in property <string> share-link: "";
+    in property <bool> is-anyone-with-link: false;
+    in property <string> anyone-role: "reader"; // "reader", "writer"
+    in property <[PermissionEntry]> permissions: [];
+    in property <bool> is-loading: false;
+    in property <string> status-msg: "";
+    in-out property <string> new-email: "";
+    in-out property <int> new-role-idx: 0; // 0: Lector, 1: Editor
+
+    callback close();
+    callback copy-link();
+    callback toggle-anyone-link(bool, string);
+    callback add-user(string, string); // email, role ("reader" | "writer")
+    callback remove-user(string); // perm_id
+    callback open-in-web();
+
+    width: 100%;
+    height: 100%;
+    background: #000000a0;
+    visible: root.is-open;
+
+    TouchArea {
+        clicked => { root.close(); }
+    }
+
+    Rectangle {
+        width: 580px;
+        height: 620px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.bg-card;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        clip: true;
+
+        TouchArea {} // Consume clicks inside modal
+
+        VerticalLayout {
+            padding: 22px;
+            spacing: 14px;
+
+            // Header
+            HorizontalLayout {
+                alignment: space-between;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+                    Text {
+                        text: "👥";
+                        font-size: 22px;
+                        vertical-alignment: center;
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: "Gestionar permisos y compartir";
+                            font-size: 16px;
+                            font-weight: 700;
+                            color: Theme.text-main;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: root.file-name;
+                            font-size: 12px;
+                            color: Theme.accent;
+                            font-weight: 600;
+                            overflow: elide;
+                            max-width: 440px;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: close_touch.has-hover ? Theme.bg-surface-hover : #00000000;
+                    Text {
+                        text: "✕";
+                        font-size: 14px;
+                        color: Theme.text-muted;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    close_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.close(); }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.border-color; }
+
+            // Sección 1: Enlace para compartir
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "Enlace para compartir";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Theme.text-secondary;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        height: 32px;
+                        horizontal-stretch: 1;
+                        background: Theme.bg-surface;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            Text {
+                                text: root.share-link;
+                                font-size: 11px;
+                                color: Theme.text-main;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 110px;
+                        height: 32px;
+                        background: copy_touch.has-hover ? Theme.accent-hover : Theme.accent;
+                        border-radius: Theme.radius-sm;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text { text: "📋"; font-size: 11px; vertical-alignment: center; }
+                            Text {
+                                text: "Copiar enlace";
+                                font-size: 11px;
+                                font-weight: 600;
+                                color: white;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        copy_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.copy-link(); }
+                        }
+                    }
+                }
+            }
+
+            // Sección 2: Acceso general (Cualquiera con el enlace vs Restringido)
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "Acceso general";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Theme.text-secondary;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    // Opción: Restringido
+                    Rectangle {
+                        height: 32px;
+                        horizontal-stretch: 1;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: !root.is-anyone-with-link ? Theme.accent : Theme.border-color;
+                        background: !root.is-anyone-with-link ? Theme.accent.transparentize(0.85) : (touch_restr.has-hover ? Theme.bg-surface-hover : Theme.bg-surface);
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text { text: "🔒"; font-size: 11px; vertical-alignment: center; }
+                            Text {
+                                text: "Restringido (Solo tú y añadidos)";
+                                font-size: 11px;
+                                font-weight: 600;
+                                color: !root.is-anyone-with-link ? Theme.accent : Theme.text-main;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        touch_restr := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle-anyone-link(false, "reader"); }
+                        }
+                    }
+
+                    // Opción: Cualquier persona con el enlace
+                    Rectangle {
+                        height: 32px;
+                        horizontal-stretch: 1;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: root.is-anyone-with-link ? Theme.success : Theme.border-color;
+                        background: root.is-anyone-with-link ? Theme.success.transparentize(0.85) : (touch_anyone.has-hover ? Theme.bg-surface-hover : Theme.bg-surface);
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text { text: "🌐"; font-size: 11px; vertical-alignment: center; }
+                            Text {
+                                text: "Cualquiera con el enlace";
+                                font-size: 11px;
+                                font-weight: 600;
+                                color: root.is-anyone-with-link ? Theme.success : Theme.text-main;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        touch_anyone := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle-anyone-link(true, "reader"); }
+                        }
+                    }
+                }
+            }
+
+            // Sección 3: Compartir con personas
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "Compartir con personas o grupos";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Theme.text-secondary;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    // Email TextInput
+                    Rectangle {
+                        height: 34px;
+                        horizontal-stretch: 1;
+                        background: Theme.bg-surface;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: email_input.has-focus ? Theme.accent : Theme.border-color;
+
+                        email_input := TextInput {
+                            x: 10px;
+                            width: parent.width - 20px;
+                            text <=> root.new-email;
+                            font-size: 12px;
+                            color: Theme.text-main;
+                            vertical-alignment: center;
+                            accepted => {
+                                if (self.text != "") {
+                                    root.add-user(self.text, root.new-role-idx == 0 ? "reader" : "writer");
+                                }
+                            }
+                        }
+
+                        if root.new-email == "": Text {
+                            x: 10px;
+                            text: "correo@gmail.com";
+                            font-size: 12px;
+                            color: Theme.text-muted;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Rol Selector (Lector / Editor)
+                    Rectangle {
+                        width: 90px;
+                        height: 34px;
+                        background: touch_role.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        Text {
+                            text: root.new-role-idx == 0 ? "Lector" : "Editor";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: Theme.text-main;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        touch_role := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.new-role-idx = root.new-role-idx == 0 ? 1 : 0;
+                            }
+                        }
+                    }
+
+                    // Botón Compartir
+                    Rectangle {
+                        width: 90px;
+                        height: 34px;
+                        background: touch_add.has-hover ? Theme.accent-hover : Theme.accent;
+                        border-radius: Theme.radius-sm;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 4px;
+                            Text { text: "+"; font-size: 14px; font-weight: 700; color: white; vertical-alignment: center; }
+                            Text {
+                                text: "Agregar";
+                                font-size: 12px;
+                                font-weight: 600;
+                                color: white;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        touch_add := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                if (root.new-email != "") {
+                                    root.add-user(root.new-email, root.new-role-idx == 0 ? "reader" : "writer");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sección 4: Personas con acceso
+            VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 6px;
+
+                Text {
+                    text: "Personas con acceso (" + root.permissions.length + ")";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Theme.text-secondary;
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: Theme.bg-surface;
+                    border-radius: Theme.radius-md;
+                    border-width: 1px;
+                    border-color: Theme.border-color;
+                    clip: true;
+
+                    ListView {
+                        for p in root.permissions: Rectangle {
+                            height: 44px;
+                            background: item_touch.has-hover ? Theme.bg-surface-hover : #00000000;
+
+                            Rectangle {
+                                y: parent.height - 1px;
+                                height: 1px;
+                                background: Theme.border-color;
+                            }
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 10px;
+                                alignment: space-between;
+
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    horizontal-stretch: 1;
+
+                                    Text {
+                                        text: p.is_anyone ? "🌐" : (p.is_owner ? "👑" : "👤");
+                                        font-size: 14px;
+                                        vertical-alignment: center;
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 1px;
+                                        Text {
+                                            text: p.name != "" ? p.name : (p.email != "" ? p.email : (p.is_anyone ? "Cualquiera con el enlace" : "Usuario"));
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            color: Theme.text-main;
+                                            overflow: elide;
+                                        }
+                                        if p.email != "" && p.name != "": Text {
+                                            text: p.email;
+                                            font-size: 10px;
+                                            color: Theme.text-muted;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+
+                                    Badge {
+                                        text: p.role_label;
+                                        badge-color: p.is_owner ? Theme.warning : (p.is_anyone ? Theme.success : Theme.accent);
+                                        badge-bg: (p.is_owner ? Theme.warning : (p.is_anyone ? Theme.success : Theme.accent)).transparentize(0.85);
+                                    }
+
+                                    if !p.is_owner: Rectangle {
+                                        width: 24px;
+                                        height: 24px;
+                                        border-radius: Theme.radius-sm;
+                                        background: del_touch.has-hover ? Theme.danger.transparentize(0.85) : #00000000;
+
+                                        Text {
+                                            text: "✕";
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: del_touch.has-hover ? Theme.danger : Theme.text-muted;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+
+                                        del_touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.remove-user(p.id); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            item_touch := TouchArea {}
+                        }
+                    }
+
+                    if root.is-loading: Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        background: Theme.bg-surface.transparentize(0.3);
+                        Text {
+                            text: "Actualizando permisos...";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: Theme.accent;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // Footer
+            HorizontalLayout {
+                alignment: space-between;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    if root.status-msg != "": Text {
+                        text: root.status-msg;
+                        font-size: 11px;
+                        color: Theme.success;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    // Abrir en Drive Web
+                    Rectangle {
+                        height: 32px;
+                        background: web_touch.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            alignment: center;
+                            spacing: 6px;
+                            Text { text: "🌐"; font-size: 11px; vertical-alignment: center; }
+                            Text {
+                                text: "Abrir en Drive Web";
+                                font-size: 11px;
+                                font-weight: 600;
+                                color: Theme.text-main;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        web_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.open-in-web(); }
+                        }
+                    }
+
+                    // Botón Cerrar
+                    Rectangle {
+                        width: 80px;
+                        height: 32px;
+                        background: close_btn_touch.has-hover ? Theme.accent-hover : Theme.accent;
+                        border-radius: Theme.radius-sm;
+
+                        Text {
+                            text: "Listo";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: white;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        close_btn_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.close(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

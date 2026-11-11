@@ -13,6 +13,7 @@ export component ExplorerView inherits VerticalLayout {
     callback reload-files();
     callback toggle-pin(string, bool);
     callback copy-link(string);
+    callback share-file(string);
     callback open-web(string);
     callback open-local(string);
 
@@ -309,7 +310,7 @@ export component ExplorerView inherits VerticalLayout {
 
                         // Actions
                         HorizontalLayout {
-                            width: 100px;
+                            width: 132px;
                             spacing: 6px;
                             alignment: end;
 
@@ -335,6 +336,27 @@ export component ExplorerView inherits VerticalLayout {
                                 touch_pin := TouchArea {
                                     mouse-cursor: pointer;
                                     clicked => { root.toggle-pin(file.id, !file.pinned); }
+                                }
+                            }
+
+                            // Share button
+                            Rectangle {
+                                width: 26px;
+                                height: 26px;
+                                border-radius: Theme.radius-sm;
+                                background: touch_share.has-hover ? Theme.bg-surface-hover : Theme.bg-surface;
+                                border-width: 1px;
+                                border-color: touch_share.has-hover ? #ffffff2e : Theme.border-color;
+                                y: (parent.height - self.height) / 2;
+                                Text {
+                                    text: "👥";
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                }
+                                touch_share := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.share-file(file.id); }
                                 }
                             }
 

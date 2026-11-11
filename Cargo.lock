@@ -1557,18 +1557,21 @@ dependencies = [
 
 [[package]]
 name = "gdsync"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "clap",
  "dirs",
  "gdsync-core",
+ "libc",
+ "rand 0.8.8",
+ "serde_json",
  "tokio",
 ]
 
 [[package]]
 name = "gdsync-core"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1585,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "gdsync-gui"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1603,7 +1606,7 @@ dependencies = [
 
 [[package]]
 name = "gdsyncd"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "clap",

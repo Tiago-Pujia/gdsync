@@ -7,12 +7,12 @@ use arboard::Clipboard;
 use gdsync_core::config::{self, Config};
 use gdsync_core::db::{Db, ExplorerItem, LocalFileStatus, PinnedRootItem};
 use gdsync_core::drive::Drive;
-use slint::{Color, ModelRc, VecModel};
+use slint::{Color, ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::desktop;
 use crate::notifications::{format_bytes, NotificationManager};
 use crate::workers;
-use crate::{AppWindow, FileEntry, FolderNode, LogEntry, PinnedItemEntry, QueueEntry};
+use crate::{AppWindow, FileEntry, FolderNode, LogEntry, PermissionEntry, PinnedItemEntry, QueueEntry};
 
 pub struct GuiController {
     app: slint::Weak<AppWindow>,
@@ -535,6 +535,160 @@ impl GuiController {
         app.on_open_console_link(|| {
             desktop::open_web_url("https://console.cloud.google.com/");
         });
+
+        // Share Modal Bindings
+        {
+            let this = self.clone();
+            app.on_open_share(move |id| {
+                this.open_share_modal(&id);
+            });
+        }
+        {
+            let this = self.clone();
+            app.on_share_copy_link(move || {
+                let Some(app) = this.app.upgrade() else { return };
+                let link = app.get_share_link().to_string();
+                if let Ok(mut clipboard) = Clipboard::new() {
+                    let _ = clipboard.set_text(&link);
+                }
+                this.show_toast("✓ Enlace copiado", "El enlace para compartir fue copiado al portapapeles", false);
+            });
+        }
+        {
+            let this = self.clone();
+            app.on_share_open_web(move || {
+                let Some(app) = this.app.upgrade() else { return };
+                let link = app.get_share_link().to_string();
+                desktop::open_web_url(&link);
+            });
+        }
+        {
+            let this = self.clone();
+            app.on_share_toggle_anyone(move |enable, role| {
+                let Some(app) = this.app.upgrade() else { return };
+                let file_id = app.get_share_file_id().to_string();
+                let perms_model = app.get_share_permissions();
+                let mut anyone_perm_id = None;
+                for i in 0..perms_model.row_count() {
+                    if let Some(entry) = perms_model.row_data(i) {
+                        if entry.is_anyone {
+                            anyone_perm_id = Some(entry.id.to_string());
+                            break;
+                        }
+                    }
+                }
+
+                let drive_opt = this.get_drive();
+                let this_clone = this.clone();
+                let role_str = role.to_string();
+                app.set_share_is_loading(true);
+
+                tokio::spawn(async move {
+                    let result = if let Some(drive) = drive_opt {
+                        if enable {
+                            drive.create_permission(&file_id, &role_str, "anyone", None).await.map(|_| ())
+                        } else if let Some(pid) = anyone_perm_id {
+                            drive.delete_permission(&file_id, &pid).await
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        Err(anyhow::anyhow!("No se ha iniciado sesión en Google Drive"))
+                    };
+
+                    let _ = slint::invoke_from_event_loop(move || {
+                        match result {
+                            Ok(_) => {
+                                this_clone.reload_share_permissions(&file_id);
+                                this_clone.show_toast(
+                                    "Permisos actualizados",
+                                    if enable { "Acceso general habilitado" } else { "Acceso general restringido" },
+                                    false,
+                                );
+                            }
+                            Err(e) => {
+                                if let Some(w) = this_clone.app.upgrade() {
+                                    w.set_share_is_loading(false);
+                                    w.set_share_status_msg(format!("Error: {e}").into());
+                                }
+                                this_clone.show_toast("Error al actualizar acceso general", &e.to_string(), true);
+                            }
+                        }
+                    });
+                });
+            });
+        }
+        {
+            let this = self.clone();
+            app.on_share_add_user(move |email, role| {
+                let Some(app) = this.app.upgrade() else { return };
+                let file_id = app.get_share_file_id().to_string();
+                let email_str = email.to_string();
+                let role_str = role.to_string();
+                let drive_opt = this.get_drive();
+                let this_clone = this.clone();
+                app.set_share_is_loading(true);
+
+                tokio::spawn(async move {
+                    let result = if let Some(drive) = drive_opt {
+                        drive.create_permission(&file_id, &role_str, "user", Some(&email_str)).await
+                    } else {
+                        Err(anyhow::anyhow!("No se ha iniciado sesión en Google Drive"))
+                    };
+
+                    let _ = slint::invoke_from_event_loop(move || {
+                        match result {
+                            Ok(_) => {
+                                this_clone.reload_share_permissions(&file_id);
+                                this_clone.show_toast("✓ Usuario añadido", &format!("Se compartió con {email_str}"), false);
+                            }
+                            Err(e) => {
+                                if let Some(w) = this_clone.app.upgrade() {
+                                    w.set_share_is_loading(false);
+                                    w.set_share_status_msg(format!("Error: {e}").into());
+                                }
+                                this_clone.show_toast("Error al agregar usuario", &e.to_string(), true);
+                            }
+                        }
+                    });
+                });
+            });
+        }
+        {
+            let this = self.clone();
+            app.on_share_remove_user(move |perm_id| {
+                let Some(app) = this.app.upgrade() else { return };
+                let file_id = app.get_share_file_id().to_string();
+                let perm_id_str = perm_id.to_string();
+                let drive_opt = this.get_drive();
+                let this_clone = this.clone();
+                app.set_share_is_loading(true);
+
+                tokio::spawn(async move {
+                    let result = if let Some(drive) = drive_opt {
+                        drive.delete_permission(&file_id, &perm_id_str).await
+                    } else {
+                        Err(anyhow::anyhow!("No se ha iniciado sesión en Google Drive"))
+                    };
+
+                    let _ = slint::invoke_from_event_loop(move || {
+                        match result {
+                            Ok(_) => {
+                                this_clone.reload_share_permissions(&file_id);
+                                this_clone.show_toast("✓ Permiso revocado", "Se eliminó el acceso al usuario", false);
+                            }
+                            Err(e) => {
+                                if let Some(w) = this_clone.app.upgrade() {
+                                    w.set_share_is_loading(false);
+                                    w.set_share_status_msg(format!("Error: {e}").into());
+                                }
+                                this_clone.show_toast("Error al revocar acceso", &e.to_string(), true);
+                            }
+                        }
+                    });
+                });
+            });
+        }
     }
 
     pub fn refresh_periodic(&self) {
@@ -866,13 +1020,119 @@ impl GuiController {
         app.set_logs(ModelRc::from(Rc::new(VecModel::from(entries))));
     }
 
+    pub fn open_share_modal(&self, file_id_or_path: &str) {
+        let Some(app) = self.app.upgrade() else { return };
+        let mount_point = self.cfg.lock().unwrap().mount_point.clone();
+        let item = match self.db.resolve_path_or_id(&mount_point, file_id_or_path) {
+            Ok(Some(it)) => it,
+            Ok(None) => {
+                self.show_error(
+                    "Elemento no encontrado",
+                    &format!("No se encontró el archivo o carpeta en Google Drive:\n{}", file_id_or_path),
+                );
+                return;
+            }
+            Err(e) => {
+                self.show_error("Error al buscar elemento", &e.to_string());
+                return;
+            }
+        };
+
+        let target_id = if item.is_shortcut() {
+            item.shortcut_target_id().unwrap_or(item.id.clone())
+        } else {
+            item.id.clone()
+        };
+
+        let web_link = if item.is_dir() {
+            format!("https://drive.google.com/drive/folders/{}", target_id)
+        } else {
+            format!("https://drive.google.com/file/d/{}/view", target_id)
+        };
+
+        app.set_share_file_id(target_id.clone().into());
+        app.set_share_file_name(item.name.clone().into());
+        app.set_share_link(web_link.into());
+        app.set_share_is_loading(true);
+        app.set_share_status_msg("Cargando permisos...".into());
+        app.set_share_modal_open(true);
+        app.window().show().ok();
+
+        self.reload_share_permissions(&target_id);
+    }
+
+    pub fn reload_share_permissions(&self, file_id: &str) {
+        let drive_opt = self.get_drive();
+        let app_weak = self.app.clone();
+        let fid = file_id.to_string();
+
+        tokio::spawn(async move {
+            let permissions = match drive_opt {
+                Some(drive) => drive.list_permissions(&fid).await,
+                None => Err(anyhow::anyhow!("No se ha iniciado sesión en Google Drive")),
+            };
+
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(app) = app_weak.upgrade() else { return };
+                app.set_share_is_loading(false);
+                match permissions {
+                    Ok(perms) => {
+                        let mut is_anyone = false;
+                        let mut anyone_role = "reader".to_string();
+                        let mut entries = Vec::new();
+
+                        for p in perms {
+                            let is_any = p.perm_type == "anyone";
+                            if is_any {
+                                is_anyone = true;
+                                anyone_role = p.role.clone();
+                            }
+                            let role_label = match p.role.as_str() {
+                                "owner" => "Propietario",
+                                "organizer" | "fileOrganizer" => "Administrador",
+                                "writer" => "Editor",
+                                "commenter" => "Comentador",
+                                "reader" => "Lector",
+                                _ => &p.role,
+                            }
+                            .to_string();
+
+                            entries.push(PermissionEntry {
+                                id: p.id.into(),
+                                perm_type: p.perm_type.clone().into(),
+                                role: p.role.clone().into(),
+                                role_label: role_label.into(),
+                                email: p.email_address.clone().unwrap_or_default().into(),
+                                name: p.display_name.clone().unwrap_or_else(|| {
+                                    if is_any {
+                                        "Cualquiera con el enlace".to_string()
+                                    } else {
+                                        p.email_address
+                                            .clone()
+                                            .unwrap_or_else(|| "Usuario".to_string())
+                                    }
+                                }).into(),
+                                is_owner: p.role == "owner",
+                                is_anyone: is_any,
+                            });
+                        }
+
+                        app.set_share_is_anyone_link(is_anyone);
+                        app.set_share_anyone_role(anyone_role.into());
+                        app.set_share_permissions(ModelRc::from(Rc::new(VecModel::from(entries))));
+                        app.set_share_status_msg("".into());
+                    }
+                    Err(e) => {
+                        app.set_share_status_msg(format!("Error: {e}").into());
+                    }
+                }
+            });
+        });
+    }
+
     fn show_toast(&self, title: &str, message: &str, is_warning: bool) {
-        if let Some(w) = self.app.upgrade() {
-            w.set_toast_title(title.into());
-            w.set_toast_message(message.into());
-            w.set_toast_is_warning(is_warning);
-            w.set_toast_visible(true);
-        }
+        let enabled = self.cfg.lock().unwrap().notifications_enabled;
+        self.notifications.lock().unwrap().notify(title, message, is_warning, enabled);
     }
 
     fn show_error(&self, title: &str, error_text: &str) {

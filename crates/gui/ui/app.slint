@@ -1,8 +1,7 @@
 import { Theme } from "./theme.slint";
-import { FileEntry, QueueEntry, FolderNode, PinnedItemEntry, LogEntry, ToastMessage } from "./models.slint";
+import { FileEntry, QueueEntry, FolderNode, PinnedItemEntry, LogEntry, ToastMessage, PermissionEntry } from "./models.slint";
 import { Header } from "./components/header.slint";
 import { Sidebar } from "./components/sidebar.slint";
-import { Toast } from "./components/toast.slint";
 import { DashboardView } from "./views/dashboard_view.slint";
 import { ExplorerView } from "./views/explorer_view.slint";
 import { QueueView } from "./views/queue_view.slint";
@@ -14,6 +13,7 @@ import { PinnedModal } from "./modals/pinned_modal.slint";
 import { TutorialModal } from "./modals/tutorial_modal.slint";
 import { ConfirmModal } from "./modals/confirm_modal.slint";
 import { ErrorModal } from "./modals/error_modal.slint";
+import { ShareModal } from "./modals/share_modal.slint";
 
 export component AppWindow inherits Window {
     title: "gdsync - Google Drive FUSE Desktop";
@@ -66,12 +66,6 @@ export component AppWindow inherits Window {
     in-out property <string> client-secret: "";
     in property <bool> is-logging-in: false;
 
-    // Toast
-    in-out property <bool> toast-visible: false;
-    in property <string> toast-title: "";
-    in property <string> toast-message: "";
-    in property <bool> toast-is-warning: false;
-
     // Modals
     in-out property <bool> pinned-modal-open: false;
     in-out property <bool> tutorial-modal-open: false;
@@ -86,6 +80,17 @@ export component AppWindow inherits Window {
     in-out property <string> confirm-action-tag: "";
     in-out property <string> error-title: "Error";
     in-out property <string> error-text: "";
+
+    // Share modal state
+    in-out property <bool> share-modal-open: false;
+    in-out property <string> share-file-id: "";
+    in-out property <string> share-file-name: "";
+    in-out property <string> share-link: "";
+    in-out property <bool> share-is-anyone-link: false;
+    in-out property <string> share-anyone-role: "reader";
+    in-out property <[PermissionEntry]> share-permissions: [];
+    in-out property <bool> share-is-loading: false;
+    in-out property <string> share-status-msg: "";
 
     // Callbacks from Header & Global
     callback toggle-daemon();
@@ -134,6 +139,14 @@ export component AppWindow inherits Window {
     callback unpin-item(string);
     callback pinned-modal-search(string);
     callback open-console-link();
+
+    // Callbacks from Share
+    callback share-copy-link();
+    callback share-toggle-anyone(bool, string);
+    callback share-add-user(string, string);
+    callback share-remove-user(string);
+    callback share-open-web();
+    callback open-share(string);
 
     VerticalLayout {
         spacing: 0px;
@@ -199,6 +212,7 @@ export component AppWindow inherits Window {
                     reload-files => { root.reload-files(); }
                     toggle-pin(id, pin) => { root.toggle-pin(id, pin); }
                     copy-link(id) => { root.copy-link(id); }
+                    share-file(id) => { root.open-share(id); }
                     open-web(id) => { root.open-web(id); }
                     open-local(loc) => { root.open-local(loc); }
                 }
@@ -304,14 +318,22 @@ export component AppWindow inherits Window {
         close => { root.error-modal-open = false; }
     }
 
-    // Toast Notification Banner (lower right)
-    Toast {
-        x: parent.width - self.width - 24px;
-        y: parent.height - self.height - 24px;
-        title: root.toast-title;
-        message: root.toast-message;
-        is-warning: root.toast-is-warning;
-        visible: root.toast-visible;
-        close => { root.toast-visible = false; }
+    ShareModal {
+        is-open: root.share-modal-open;
+        file-id: root.share-file-id;
+        file-name: root.share-file-name;
+        share-link: root.share-link;
+        is-anyone-with-link: root.share-is-anyone-link;
+        anyone-role: root.share-anyone-role;
+        permissions: root.share-permissions;
+        is-loading: root.share-is-loading;
+        status-msg: root.share-status-msg;
+
+        close => { root.share-modal-open = false; }
+        copy-link => { root.share-copy-link(); }
+        toggle-anyone-link(active, role) => { root.share-toggle-anyone(active, role); }
+        add-user(email, role) => { root.share-add-user(email, role); }
+        remove-user(id) => { root.share-remove-user(id); }
+        open-in-web => { root.share-open-web(); }
     }
 }

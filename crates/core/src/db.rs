@@ -4,7 +4,7 @@ use crate::now;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub const ROOT_INO: u64 = 1;
@@ -33,6 +33,35 @@ impl Item {
     /// Docs/Sheets/Slides/... and shortcuts: no binary content, shown as a link.
     pub fn is_google_doc(&self) -> bool {
         self.mime.starts_with(GOOGLE_APPS_PREFIX) && !self.is_dir()
+    }
+    /// Target ID of a shortcut if present in web_link.
+    pub fn shortcut_target_id(&self) -> Option<String> {
+        if !self.is_shortcut() {
+            return None;
+        }
+        let link = self.web_link.as_deref()?;
+        if let Some(pos) = link.find("/drive/folders/") {
+            let id = &link[pos + "/drive/folders/".len()..];
+            let id = id.split(['?', '#', '/']).next()?;
+            if !id.is_empty() && id != self.id {
+                return Some(id.to_string());
+            }
+        }
+        if let Some(pos) = link.find("/open?id=") {
+            let id = &link[pos + "/open?id=".len()..];
+            let id = id.split(['&', '#']).next()?;
+            if !id.is_empty() && id != self.id {
+                return Some(id.to_string());
+            }
+        }
+        if let Some(pos) = link.find("/file/d/") {
+            let id = &link[pos + "/file/d/".len()..];
+            let id = id.split(['?', '#', '/']).next()?;
+            if !id.is_empty() && id != self.id {
+                return Some(id.to_string());
+            }
+        }
+        None
     }
     /// Identifies the remote content version, to know if the cached copy is stale.
     pub fn version(&self) -> String {
@@ -730,6 +759,95 @@ impl Db {
         Ok(Some(current_item))
     }
 
+    /// Resolves an item given either:
+    /// - An item ID directly,
+    /// - An absolute path within or relative path to `mount_point`,
+    /// - A file:// URL (with percent decoding).
+    pub fn resolve_path_or_id(&self, mount_point: &Path, input: &str) -> Result<Option<Item>> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+
+        // 1. Direct item ID lookup
+        if let Some(item) = self.by_id(trimmed)? {
+            return Ok(Some(item));
+        }
+
+        // 2. Decode percent-encoding / strip file:// prefix
+        let clean_str = if let Some(stripped) = trimmed.strip_prefix("file://") {
+            crate::names::decode_percent(stripped)
+        } else {
+            trimmed.to_string()
+        };
+
+        let p = Path::new(&clean_str);
+        let rel = if p.is_absolute() {
+            if let Ok(r) = p.strip_prefix(mount_point) {
+                r
+            } else {
+                p
+            }
+        } else {
+            p
+        };
+
+        self.resolve_relative_path(rel)
+    }
+
+    /// Reconstructs the exact local relative path in FUSE for an item ID.
+    /// Returns None if the item does not exist or cannot be traced back to ROOT_INO.
+    pub fn resolve_item_relative_path(&self, item_id: &str) -> Result<Option<PathBuf>> {
+        let root = match self.by_ino(ROOT_INO)? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        if item_id == root.id {
+            return Ok(Some(PathBuf::new()));
+        }
+
+        // Trace ancestors upwards: [item, parent, grandparent, ..., root]
+        let mut chain = Vec::new();
+        let mut curr_id = item_id.to_string();
+        let mut visited = HashSet::new();
+
+        while curr_id != root.id {
+            if !visited.insert(curr_id.clone()) {
+                // Loop detected
+                return Ok(None);
+            }
+            let item = match self.by_id(&curr_id)? {
+                Some(it) => it,
+                None => return Ok(None),
+            };
+            let parent_id = match &item.parent_id {
+                Some(pid) if !pid.is_empty() => pid.clone(),
+                _ => return Ok(None), // Disconnected from root
+            };
+            chain.push(item);
+            curr_id = parent_id;
+        }
+
+        // Chain is [leaf, ..., child_of_root]. Reverse it to traverse from root down:
+        chain.reverse();
+
+        let mut rel_path = PathBuf::new();
+        let mut parent_id = root.id;
+
+        for item in chain {
+            let children = self.children(&parent_id)?;
+            let entries = crate::names::local_entries(children);
+            let local_name = match entries.iter().find(|(_, c)| c.id == item.id) {
+                Some((name, _)) => name.clone(),
+                None => return Ok(None),
+            };
+            rel_path.push(local_name);
+            parent_id = item.id;
+        }
+
+        Ok(Some(rel_path))
+    }
+
     // ---- upload queue ----
 
     pub fn enqueue_upload(&self, file_id: &str, op: &str, payload: Option<&str>) -> Result<i64> {
@@ -866,6 +984,14 @@ impl Db {
             [],
             |r| r.get::<_, i64>(0),
         )? as u64)
+    }
+
+    pub fn pending_task_for_file(&self, file_id: &str) -> Result<Option<UploadTask>> {
+        let sql = "SELECT id, file_id, op, payload, status, created_at, attempts, last_error
+                   FROM upload_queue WHERE file_id=?1 ORDER BY id DESC LIMIT 1";
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(sql)?;
+        Ok(stmt.query_row([file_id], upload_row).optional()?)
     }
 
     pub fn pending_uploads_summary(&self) -> Result<QueueSummary> {

@@ -1,31 +1,57 @@
 [Desktop Entry]
 Type=Service
 MimeType=all/allfiles;inode/directory;
-Actions=Pin;Unpin;OpenWeb;CopyLink;
+Actions=01_Pin;02_Unpin;03_Symlink;04_Info;05_Share;06_History;07_OpenWeb;08_CopyLink;
 X-KDE-Submenu=Google Drive (gdsync)
 X-KDE-Priority=TopLevel
 Icon=folder-gdrive
 
-[Desktop Action Pin]
+[Desktop Action 01_Pin]
 Name=Mantener siempre en este equipo (Disponible sin conexión)
 Name[es]=Mantener siempre en este equipo (Disponible sin conexión)
 Icon=emblem-checked
 Exec=gdsync pin %F
 
-[Desktop Action Unpin]
+[Desktop Action 02_Unpin]
 Name=Liberar espacio local (Solo en la nube)
 Name[es]=Liberar espacio local (Solo en la nube)
 Icon=folder-cloud
 Exec=gdsync unpin %F
 
-[Desktop Action OpenWeb]
+[Desktop Action 03_Symlink]
+Name=Crear enlace simbólico / acceso directo...
+Name[es]=Crear enlace simbólico / acceso directo...
+Icon=emblem-symbolic-link
+Exec=gdsync symlink %F
+
+[Desktop Action 04_Info]
+Name=Información y estado en gdsync
+Name[es]=Información y estado en gdsync
+Icon=dialog-information
+Exec=gdsync info %F
+
+[Desktop Action 05_Share]
+Name=Gestionar permisos y compartir
+Name[es]=Gestionar permisos y compartir
+Icon=document-share
+Exec=gdsync share %F
+
+[Desktop Action 06_History]
+Name=Ver historial de versiones (Web)
+Name[es]=Ver historial de versiones (Web)
+Icon=view-history
+Exec=gdsync history %F
+
+[Desktop Action 07_OpenWeb]
 Name=Abrir en Google Drive (Web)
 Name[es]=Abrir en Google Drive (Web)
 Icon=internet-web-browser
 Exec=gdsync open-web %F
 
-[Desktop Action CopyLink]
+[Desktop Action 08_CopyLink]
 Name=Copiar enlace para compartir
 Name[es]=Copiar enlace para compartir
 Icon=edit-copy
 Exec=gdsync copy-link %F
+
+

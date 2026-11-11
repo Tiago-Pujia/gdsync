@@ -2,8 +2,10 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::Arc;
 use anyhow::{Context, Result};
 use slint::ComponentHandle;
+use crate::controller::GuiController;
 
 pub fn get_socket_path() -> PathBuf {
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
@@ -19,12 +21,20 @@ pub enum InstanceCheck {
     AlreadyRunning,
 }
 
-pub fn check_single_instance(minimized: bool, target_tab: Option<i32>) -> Result<InstanceCheck> {
+pub fn check_single_instance(
+    minimized: bool,
+    target_tab: Option<i32>,
+    share_target: Option<&str>,
+) -> Result<InstanceCheck> {
     let socket_path = get_socket_path();
 
     if socket_path.exists() {
         if let Ok(mut stream) = UnixStream::connect(&socket_path) {
-            if let Some(tab) = target_tab {
+            if let Some(target) = share_target {
+                let msg = format!("SHARE {}\n", target);
+                let _ = stream.write_all(msg.as_bytes());
+                let _ = stream.flush();
+            } else if let Some(tab) = target_tab {
                 let msg = format!("TAB {}\n", tab);
                 let _ = stream.write_all(msg.as_bytes());
                 let _ = stream.flush();
@@ -49,6 +59,7 @@ pub fn check_single_instance(minimized: bool, target_tab: Option<i32>) -> Result
 pub fn spawn_ipc_listener(
     std_listener: UnixListener,
     window_handle: slint::Weak<crate::AppWindow>,
+    controller: Arc<GuiController>,
 ) {
     std::thread::spawn(move || {
         let _ = std_listener.set_nonblocking(false);
@@ -65,7 +76,14 @@ pub fn spawn_ipc_listener(
                                 w.window().show().ok();
                             }
                         });
-                    } else if let Some(tab_str) = cmd.strip_prefix("TAB ") {
+                    } else if let Some(target) = cmd.strip_prefix("SHARE ") {
+                        let c = controller.clone();
+                        let target_str = target.to_string();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            c.open_share_modal(&target_str);
+                        });
+                    }
+ else if let Some(tab_str) = cmd.strip_prefix("TAB ") {
                         if let Ok(idx) = tab_str.parse::<i32>() {
                             let handle = window_handle.clone();
                             let _ = slint::invoke_from_event_loop(move || {
@@ -122,6 +140,7 @@ pub fn spawn_ipc_listener(
                                 w.set_tutorial_modal_open(false);
                                 w.set_confirm_modal_open(false);
                                 w.set_error_modal_open(false);
+                                w.set_share_modal_open(false);
                             }
                         });
                     }

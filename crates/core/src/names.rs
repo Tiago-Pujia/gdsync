@@ -1,6 +1,7 @@
 //! Maps Drive names to valid, unique local file names within a directory.
-use crate::db::Item;
+use crate::db::{Db, Item};
 use std::collections::HashSet;
+use std::path::Path;
 
 /// Extension and icon for Google Docs types, which are shown as `.desktop` links.
 fn google_kind(mime: &str) -> (&'static str, &'static str) {
@@ -106,6 +107,48 @@ pub fn desktop_link(item: &Item) -> String {
     )
 }
 
+/// Content of the `.desktop` link that represents a Google Doc or a shortcut.
+/// If `item` is a shortcut:
+/// - If target is a Google Doc, opens the Google Docs web URL in the browser.
+/// - If target is a regular file or folder present locally in FUSE, opens the local file:// URL in the file manager / app.
+/// - If target is not present locally, falls back to opening Google Drive web URL in the browser.
+pub fn desktop_link_resolved(item: &Item, db: &Db, mount_point: &Path) -> String {
+    if !item.is_shortcut() {
+        return desktop_link(item);
+    }
+
+    let target_id = item.shortcut_target_id();
+    let target_item = target_id.as_deref().and_then(|tid| db.by_id(tid).ok().flatten());
+
+    if let Some(target) = target_item {
+        // 1. If target is a Google Doc, always open in browser
+        if target.is_google_doc() && !target.is_shortcut() {
+            let url = target
+                .web_link
+                .unwrap_or_else(|| format!("https://drive.google.com/open?id={}", target.id));
+            let name = item.name.replace(['\n', '\r'], " ");
+            let icon = google_kind(&target.mime).1;
+            return format!("[Desktop Entry]\nType=Link\nName={name}\nURL={url}\nIcon={icon}\n");
+        }
+
+        // 2. If target is a normal file or folder, check if it exists locally in FUSE
+        if let Ok(Some(rel_path)) = db.resolve_item_relative_path(&target.id) {
+            let full_path = mount_point.join(rel_path);
+            let url = format!("file://{}", full_path.to_string_lossy());
+            let name = item.name.replace(['\n', '\r'], " ");
+            let icon = if target.is_dir() {
+                "folder-link"
+            } else {
+                "emblem-symbolic-link"
+            };
+            return format!("[Desktop Entry]\nType=Link\nName={name}\nURL={url}\nIcon={icon}\n");
+        }
+    }
+
+    // Fallback: browser link to Google Drive web
+    desktop_link(item)
+}
+
 /// True for temporary/lock/swap files created by editors and file managers
 /// that should stay local in FUSE and never be uploaded as standalone files.
 pub fn is_temp_file(name: &str) -> bool {
@@ -126,6 +169,28 @@ pub fn is_temp_file(name: &str) -> bool {
         || name.ends_with(".tmp")
         || matches!(name, ".DS_Store" | "Thumbs.db" | "4913")
 }
+
+/// Decodes percent-encoded URL strings like %20 -> space.
+pub fn decode_percent(s: &str) -> String {
+    let mut bytes = Vec::new();
+    let mut chars = s.bytes();
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            if let (Some(h1), Some(h2)) = (chars.next(), chars.next()) {
+                let hex_str = [h1, h2];
+                if let Ok(hex) = std::str::from_utf8(&hex_str) {
+                    if let Ok(val) = u8::from_str_radix(hex, 16) {
+                        bytes.push(val);
+                        continue;
+                    }
+                }
+            }
+        }
+        bytes.push(b);
+    }
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -208,5 +273,48 @@ mod tests {
         assert!(!is_temp_file("nota.txt"));
         assert!(!is_temp_file(".gitignore"));
         assert!(!is_temp_file("informe.odt"));
+    }
+
+    #[test]
+    fn test_desktop_link_resolved() {
+        let db = Db::open_in_memory().unwrap();
+        let rf = |id: &str, name: &str, parent: &str, mime: &str| crate::drive::RemoteFile {
+            id: id.into(),
+            name: name.into(),
+            mime_type: mime.into(),
+            size: Some("42".into()),
+            md5_checksum: Some("abc".into()),
+            modified_time: Some("2024-05-01T12:34:56.789Z".into()),
+            parents: vec![parent.into()],
+            trashed: false,
+            web_view_link: None,
+            shortcut_details: None,
+        };
+
+        db.upsert_root(&rf("root_id", "Google Drive", "", crate::drive::FOLDER_MIME)).unwrap();
+        db.upsert(&rf("DOC1", "MyDoc", "root_id", "application/vnd.google-apps.document")).unwrap();
+        db.upsert(&rf("FOL1", "Photos", "root_id", crate::drive::FOLDER_MIME)).unwrap();
+
+        let mount = Path::new("/home/user/GoogleDrive");
+
+        // 1. Shortcut to local folder
+        let mut sc_fol = item("SC_F", "Photos Shortcut", "application/vnd.google-apps.shortcut");
+        sc_fol.web_link = Some("https://drive.google.com/drive/folders/FOL1".into());
+        let res_fol = desktop_link_resolved(&sc_fol, &db, mount);
+        assert!(res_fol.contains("URL=file:///home/user/GoogleDrive/Photos"));
+        assert!(res_fol.contains("Icon=folder-link"));
+
+        // 2. Shortcut to Google Doc (must open browser)
+        let mut sc_doc = item("SC_D", "Doc Shortcut", "application/vnd.google-apps.shortcut");
+        sc_doc.web_link = Some("https://drive.google.com/open?id=DOC1".into());
+        let res_doc = desktop_link_resolved(&sc_doc, &db, mount);
+        assert!(res_doc.contains("URL=https://drive.google.com/open?id=DOC1"));
+        assert!(res_doc.contains("Icon=x-office-document"));
+
+        // 3. Shortcut to remote item not in local DB (fallback to web)
+        let mut sc_ext = item("SC_X", "External Shortcut", "application/vnd.google-apps.shortcut");
+        sc_ext.web_link = Some("https://drive.google.com/open?id=NON_EXISTENT".into());
+        let res_ext = desktop_link_resolved(&sc_ext, &db, mount);
+        assert!(res_ext.contains("URL=https://drive.google.com/open?id=NON_EXISTENT"));
     }
 }

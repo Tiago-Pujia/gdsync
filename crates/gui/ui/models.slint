@@ -55,3 +55,14 @@ export struct ToastMessage {
     message: string,
     is_warning: bool,
 }
+
+export struct PermissionEntry {
+    id: string,
+    perm_type: string,
+    role: string,
+    role_label: string,
+    email: string,
+    name: string,
+    is_owner: bool,
+    is_anyone: bool,
+}

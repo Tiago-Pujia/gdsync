@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::now;
 use anyhow::{bail, Context, Result};
 use reqwest::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -13,6 +13,24 @@ use tokio::sync::Mutex;
 pub const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 pub const SHORTCUT_MIME: &str = "application/vnd.google-apps.shortcut";
 pub const GOOGLE_APPS_PREFIX: &str = "application/vnd.google-apps.";
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Permission {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub perm_type: String, // "user", "group", "domain", "anyone"
+    pub role: String,      // "owner", "organizer", "fileOrganizer", "writer", "commenter", "reader"
+    pub email_address: Option<String>,
+    pub display_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionList {
+    #[serde(default)]
+    permissions: Vec<Permission>,
+}
 
 const API: &str = "https://www.googleapis.com/drive/v3";
 const FILE_FIELDS: &str = "id,name,mimeType,size,md5Checksum,modifiedTime,parents,trashed,webViewLink,shortcutDetails";
@@ -334,6 +352,20 @@ impl Drive {
         Ok(resp.json().await?)
     }
 
+    /// Creates a shortcut in Drive pointing to `target_id`.
+    pub async fn create_remote_shortcut(&self, name: &str, parent_id: &str, target_id: &str) -> Result<RemoteFile> {
+        let body = serde_json::json!({
+            "name": name,
+            "parents": [parent_id],
+            "mimeType": SHORTCUT_MIME,
+            "shortcutDetails": {
+                "targetId": target_id
+            }
+        });
+        let resp = self.post_json(&format!("{API}/files"), &[("fields", FILE_FIELDS)], &body).await?;
+        Ok(resp.json().await?)
+    }
+
     /// Moves a file to Google Drive trash.
     pub async fn trash_remote_file(&self, file_id: &str) -> Result<()> {
         let body = serde_json::json!({ "trashed": true });
@@ -644,5 +676,74 @@ impl Drive {
             .await?;
 
         self.execute_resumable_upload(&session_url, file_path, size).await
+    }
+
+    /// Lists all permissions on a file or folder.
+    pub async fn list_permissions(&self, file_id: &str) -> Result<Vec<Permission>> {
+        let resp: PermissionList = self
+            .get(
+                &format!("{API}/files/{file_id}/permissions"),
+                &[("fields", "permissions(id,type,role,emailAddress,displayName)")],
+            )
+            .await?
+            .json()
+            .await?;
+        Ok(resp.permissions)
+    }
+
+    /// Adds a permission (e.g. share with user email or anyone with link).
+    pub async fn create_permission(
+        &self,
+        file_id: &str,
+        role: &str,
+        perm_type: &str,
+        email: Option<&str>,
+    ) -> Result<Permission> {
+        let mut body = serde_json::json!({
+            "role": role,
+            "type": perm_type,
+        });
+        if let Some(e) = email {
+            body["emailAddress"] = serde_json::Value::String(e.to_string());
+        }
+        let resp = self
+            .post_json(
+                &format!("{API}/files/{file_id}/permissions"),
+                &[("fields", "id,type,role,emailAddress,displayName")],
+                &body,
+            )
+            .await?;
+        Ok(resp.json().await?)
+    }
+
+    /// Deletes a permission (e.g. revokes access for a user or removes link sharing).
+    pub async fn delete_permission(&self, file_id: &str, permission_id: &str) -> Result<()> {
+        let _ = self
+            .request_bytes(
+                reqwest::Method::DELETE,
+                &format!("{API}/files/{file_id}/permissions/{permission_id}"),
+                &[],
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Updates a permission's role (e.g. change from reader to writer).
+    pub async fn update_permission(
+        &self,
+        file_id: &str,
+        permission_id: &str,
+        role: &str,
+    ) -> Result<Permission> {
+        let body = serde_json::json!({ "role": role });
+        let resp = self
+            .patch_json(
+                &format!("{API}/files/{file_id}/permissions/{permission_id}"),
+                &[("fields", "id,type,role,emailAddress,displayName")],
+                &body,
+            )
+            .await?;
+        Ok(resp.json().await?)
     }
 }

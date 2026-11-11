@@ -26,8 +26,16 @@ fn main() -> Result<()> {
         }
     });
 
+    let share_target = args.windows(2).find_map(|w| {
+        if w[0] == "--share" || w[0] == "-s" {
+            Some(w[1].clone())
+        } else {
+            None
+        }
+    });
+
     // 1. Single Instance Check via Unix Domain Socket
-    let listener = match ipc::check_single_instance(minimized, target_tab)? {
+    let listener = match ipc::check_single_instance(minimized, target_tab, share_target.as_deref())? {
         ipc::InstanceCheck::AlreadyRunning => {
             println!("gdsync-gui ya se encuentra en ejecución. Trayendo ventana al frente.");
             return Ok(());
@@ -57,8 +65,19 @@ fn main() -> Result<()> {
     }
     let app_weak = app.as_weak();
 
-    // 5. Spawn IPC Listener
-    ipc::spawn_ipc_listener(listener, app_weak.clone());
+    // 5. Initialize Controller and Slint bindings
+    let controller = Arc::new(controller::GuiController::new(
+        app_weak.clone(),
+        db.clone(),
+        cfg.clone(),
+        drive.clone(),
+        notifications.clone(),
+        tray_status.clone(),
+    ));
+    controller.clone().init_and_bind();
+
+    // 6. Spawn IPC Listener
+    ipc::spawn_ipc_listener(listener, app_weak.clone(), controller.clone());
 
     // 6. Spawn System Tray via ksni
     let tray_inst = tray::GdsyncTray {
@@ -108,16 +127,9 @@ fn main() -> Result<()> {
         let _ = tray_inst.spawn().await;
     });
 
-    // 7. Initialize Controller and Slint bindings
-    let controller = Arc::new(controller::GuiController::new(
-        app_weak.clone(),
-        db.clone(),
-        cfg.clone(),
-        drive.clone(),
-        notifications.clone(),
-        tray_status.clone(),
-    ));
-    controller.init_and_bind();
+    if let Some(ref target) = share_target {
+        controller.open_share_modal(target);
+    }
 
     // 8. Handle Window Close ("X" button)
     {
@@ -136,8 +148,8 @@ fn main() -> Result<()> {
         });
     }
 
-    // 9. Show window if not starting minimized
-    if !minimized {
+    // 9. Show window if not starting minimized or if share modal was requested
+    if !minimized || share_target.is_some() {
         app.show()?;
     }
 
