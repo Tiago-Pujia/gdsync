@@ -90,14 +90,14 @@ jobs:
       - name: Package Arch Linux (.pkg.tar.zst)
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
-          mkdir -p arch_work
-          sed "s/@VERSION@/${VERSION}/g" packaging/arch/PKGBUILD.in > arch_work/PKGBUILD
+          sed "s/@VERSION@/${VERSION}/g" packaging/arch/PKGBUILD.in > PKGBUILD
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/workspace" \
-            -w "/workspace/arch_work" \
+            -w "/workspace" \
             archlinux:base-devel \
             bash -c "useradd -m builder && chown -R builder:builder /workspace && su builder -c 'makepkg --nodeps --noextract -f'"
-          cp arch_work/*.pkg.tar.zst dist/
+          cp gdsync-*.pkg.tar.zst dist/
+          rm -f PKGBUILD gdsync-*.pkg.tar.zst
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
@@ -121,6 +121,7 @@ jobs:
         run: |
           brew install --cask macfuse || true
           brew install pkgconf
+          echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
 
       - name: Build Apple Silicon release binaries (aarch64)
         run: cargo build --workspace --release --target aarch64-apple-darwin

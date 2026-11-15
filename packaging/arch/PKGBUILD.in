@@ -7,18 +7,19 @@ arch=('x86_64')
 url="https://github.com/Tiago-Pujia/gdsync"
 license=('MIT')
 depends=('fuse3' 'openssl' 'fontconfig')
+options=('!debug')
 
 package() {
-  install -Dm755 "$srcdir/target/release/gdsync" "$pkgdir/usr/bin/gdsync"
-  install -Dm755 "$srcdir/target/release/gdsyncd" "$pkgdir/usr/bin/gdsyncd"
-  install -Dm755 "$srcdir/target/release/gdsync-gui" "$pkgdir/usr/bin/gdsync-gui"
-  install -Dm644 "$srcdir/packaging/desktop/gdsync.desktop" "$pkgdir/usr/share/applications/gdsync.desktop"
-  install -Dm644 "$srcdir/packaging/dolphin/gdsync.desktop" "$pkgdir/usr/share/kio/servicemenus/gdsync.desktop"
-  install -Dm644 "$srcdir/packaging/systemd/gdsyncd.service" "$pkgdir/usr/lib/systemd/user/gdsyncd.service"
-  install -Dm644 "$srcdir/packaging/icons/hicolor/scalable/apps/gdsync.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/gdsync.svg"
-  install -Dm644 "$srcdir/packaging/icons/hicolor/48x48/apps/gdsync.png" "$pkgdir/usr/share/icons/hicolor/48x48/apps/gdsync.png"
-  install -Dm644 "$srcdir/packaging/icons/hicolor/128x128/apps/gdsync.png" "$pkgdir/usr/share/icons/hicolor/128x128/apps/gdsync.png"
-  install -Dm644 "$srcdir/packaging/icons/hicolor/256x256/apps/gdsync.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/gdsync.png"
-  install -Dm644 "$srcdir/packaging/icons/hicolor/256x256/apps/gdsync.png" "$pkgdir/usr/share/gdsync/icon.png"
-  install -Dm644 "$srcdir/packaging/icons/hicolor/scalable/apps/gdsync.svg" "$pkgdir/usr/share/gdsync/icon.svg"
+  install -Dm755 "$startdir/target/release/gdsync" "$pkgdir/usr/bin/gdsync"
+  install -Dm755 "$startdir/target/release/gdsyncd" "$pkgdir/usr/bin/gdsyncd"
+  install -Dm755 "$startdir/target/release/gdsync-gui" "$pkgdir/usr/bin/gdsync-gui"
+  install -Dm644 "$startdir/packaging/desktop/gdsync.desktop" "$pkgdir/usr/share/applications/gdsync.desktop"
+  install -Dm644 "$startdir/packaging/dolphin/gdsync.desktop" "$pkgdir/usr/share/kio/servicemenus/gdsync.desktop"
+  install -Dm644 "$startdir/packaging/systemd/gdsyncd.service" "$pkgdir/usr/lib/systemd/user/gdsyncd.service"
+  install -Dm644 "$startdir/packaging/icons/hicolor/scalable/apps/gdsync.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/gdsync.svg"
+  install -Dm644 "$startdir/packaging/icons/hicolor/48x48/apps/gdsync.png" "$pkgdir/usr/share/icons/hicolor/48x48/apps/gdsync.png"
+  install -Dm644 "$startdir/packaging/icons/hicolor/128x128/apps/gdsync.png" "$pkgdir/usr/share/icons/hicolor/128x128/apps/gdsync.png"
+  install -Dm644 "$startdir/packaging/icons/hicolor/256x256/apps/gdsync.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/gdsync.png"
+  install -Dm644 "$startdir/packaging/icons/hicolor/256x256/apps/gdsync.png" "$pkgdir/usr/share/gdsync/icon.png"
+  install -Dm644 "$startdir/packaging/icons/hicolor/scalable/apps/gdsync.svg" "$pkgdir/usr/share/gdsync/icon.svg"
 }
