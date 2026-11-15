@@ -142,7 +142,11 @@ where
                     if local_path.exists() {
                         let _ = tokio::fs::rename(&local_path, &new_cache_path).await;
                     }
-                    db.replace_file_id(&task.file_id, &remote.id, remote.md5_checksum.as_deref(), mtime)?;
+                    let file_size = remote.size.as_deref().and_then(|s| s.parse::<u64>().ok())
+                        .or_else(|| std::fs::metadata(&new_cache_path).ok().map(|m| m.len()))
+                        .unwrap_or(item.size);
+                    db.replace_file_id(&task.file_id, &remote.id, remote.md5_checksum.as_deref(), mtime, file_size)?;
+                    cache.evict();
                     let _ = db.cancel_pending_updates(&remote.id);
                     db.complete_upload(task.id)?;
                     done += 1;
@@ -165,6 +169,8 @@ where
                         let remote = drive.update_file_path(&task.file_id, &item.mime, &local_path).await?;
                         let mtime = remote.modified_time.as_deref().and_then(crate::db::parse_rfc3339).unwrap_or(0);
                         db.update_item_size_mtime(&task.file_id, data_len, mtime)?;
+                        let _ = db.cache_put(&task.file_id, &format!("mtime:{mtime}"), data_len);
+                        cache.evict();
                     }
                     let _ = db.cancel_pending_updates(&task.file_id);
                     db.complete_upload(task.id)?;
@@ -184,7 +190,7 @@ where
                     info!("creando carpeta remota '{}'", item.name);
                     let remote = drive.create_remote_folder(&item.name, parent_id).await?;
                     let mtime = remote.modified_time.as_deref().and_then(crate::db::parse_rfc3339).unwrap_or(0);
-                    db.replace_file_id(&task.file_id, &remote.id, None, mtime)?;
+                    db.replace_file_id(&task.file_id, &remote.id, None, mtime, 0)?;
                     db.complete_upload(task.id)?;
                     done += 1;
                 }
@@ -212,7 +218,7 @@ where
                     info!("creando acceso directo remoto '{}' apuntando a '{}'", item.name, target_id);
                     let remote = drive.create_remote_shortcut(&item.name, parent_id, &target_id).await?;
                     let mtime = remote.modified_time.as_deref().and_then(crate::db::parse_rfc3339).unwrap_or(0);
-                    db.replace_file_id(&task.file_id, &remote.id, None, mtime)?;
+                    db.replace_file_id(&task.file_id, &remote.id, None, mtime, 0)?;
                     db.complete_upload(task.id)?;
                     done += 1;
                 }

@@ -462,7 +462,11 @@ impl Filesystem for DriveFs {
                     _ => false,
                 });
                 let actual_size = file.metadata().map(|m| m.len()).unwrap_or(0);
-                let _ = self.db.update_item_size_mtime(&item_id, actual_size, gdsync_core::now());
+                let now = gdsync_core::now();
+                let _ = self.db.update_item_size_mtime(&item_id, actual_size, now);
+                let version = format!("mtime:{now}");
+                let _ = self.db.cache_put(&item_id, &version, actual_size);
+                self.cache.evict();
                 if !still_open {
                     let op = if item_id.starts_with("local_") {
                         "create"

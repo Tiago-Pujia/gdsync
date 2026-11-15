@@ -321,14 +321,22 @@ impl Drive {
     pub async fn download(&self, id: &str, dest: &Path) -> Result<()> {
         let mut resp = self.get(&format!("{API}/files/{id}"), &[("alt", "media")]).await?;
         let tmp = dest.with_extension("part");
-        let mut f = tokio::fs::File::create(&tmp).await?;
-        while let Some(chunk) = resp.chunk().await? {
-            f.write_all(&chunk).await?;
+        let download_res: Result<()> = async {
+            let mut f = tokio::fs::File::create(&tmp).await?;
+            while let Some(chunk) = resp.chunk().await? {
+                f.write_all(&chunk).await?;
+            }
+            f.flush().await?;
+            drop(f);
+            tokio::fs::rename(&tmp, dest).await?;
+            Ok(())
         }
-        f.flush().await?;
-        drop(f);
-        tokio::fs::rename(&tmp, dest).await?;
-        Ok(())
+        .await;
+
+        if download_res.is_err() {
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
+        download_res
     }
 
     /// Query Drive storage quota: returns (used_bytes, total_limit_bytes).

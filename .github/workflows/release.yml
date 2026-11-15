@@ -2,17 +2,19 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build-release:
-    name: Build & Package Linux x86_64
+  build-debian:
+    name: Build Debian/Ubuntu (.deb & tar.gz)
     runs-on: ubuntu-24.04
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -28,13 +30,18 @@ jobs:
       - name: Build release binaries
         run: cargo build --workspace --release
 
-      - name: Package distribution bundle
-        id: package
+      - name: Package .deb and tar.gz
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          PKG_NAME="gdsync-v${VERSION}-linux-x86_64"
-          echo "PKG_NAME=${PKG_NAME}" >> "$GITHUB_ENV"
+          if [ -n "$GITHUB_REF_NAME" ] && [[ "$GITHUB_REF_NAME" =~ ^v[0-9] ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION=$(grep -m 1 '^version = ' Cargo.toml | cut -d '"' -f 2)
+          fi
+          echo "Building packages for version ${VERSION}..."
+          mkdir -p dist
 
+          # 1. Universal Linux tar.gz bundle
+          PKG_NAME="gdsync-v${VERSION}-linux-x86_64"
           mkdir -p "${PKG_NAME}/bin" "${PKG_NAME}/packaging"
           cp target/release/gdsync "${PKG_NAME}/bin/"
           cp target/release/gdsyncd "${PKG_NAME}/bin/"
@@ -43,15 +50,195 @@ jobs:
           cp install.sh "${PKG_NAME}/"
           cp uninstall.sh "${PKG_NAME}/"
           cp README.md "${PKG_NAME}/"
-
           chmod +x "${PKG_NAME}/install.sh" "${PKG_NAME}/uninstall.sh" "${PKG_NAME}/bin/"*
-          tar -czf "${PKG_NAME}.tar.gz" "${PKG_NAME}"
-          sha256sum "${PKG_NAME}.tar.gz" > "${PKG_NAME}.tar.gz.sha256"
+          tar -czf "dist/${PKG_NAME}.tar.gz" "${PKG_NAME}"
 
-      - name: Create GitHub Release
+          # 2. Debian .deb package
+          DEB_DIR="deb_pkg"
+          mkdir -p "$DEB_DIR/DEBIAN"
+          mkdir -p "$DEB_DIR/usr/bin"
+          mkdir -p "$DEB_DIR/usr/share/applications"
+          mkdir -p "$DEB_DIR/usr/share/kio/servicemenus"
+          mkdir -p "$DEB_DIR/usr/lib/systemd/user"
+          mkdir -p "$DEB_DIR/usr/share/icons/hicolor/scalable/apps"
+          mkdir -p "$DEB_DIR/usr/share/icons/hicolor/48x48/apps"
+          mkdir -p "$DEB_DIR/usr/share/icons/hicolor/128x128/apps"
+          mkdir -p "$DEB_DIR/usr/share/icons/hicolor/256x256/apps"
+          mkdir -p "$DEB_DIR/usr/share/gdsync"
+
+          cp target/release/gdsync "$DEB_DIR/usr/bin/"
+          cp target/release/gdsyncd "$DEB_DIR/usr/bin/"
+          cp target/release/gdsync-gui "$DEB_DIR/usr/bin/"
+          cp packaging/desktop/gdsync.desktop "$DEB_DIR/usr/share/applications/"
+          cp packaging/dolphin/gdsync.desktop "$DEB_DIR/usr/share/kio/servicemenus/"
+          sed "s|^ExecStart=.*|ExecStart=/usr/bin/gdsyncd|g" packaging/systemd/gdsyncd.service > "$DEB_DIR/usr/lib/systemd/user/gdsyncd.service"
+          cp packaging/icons/hicolor/scalable/apps/gdsync.svg "$DEB_DIR/usr/share/icons/hicolor/scalable/apps/"
+          cp packaging/icons/hicolor/48x48/apps/gdsync.png "$DEB_DIR/usr/share/icons/hicolor/48x48/apps/"
+          cp packaging/icons/hicolor/128x128/apps/gdsync.png "$DEB_DIR/usr/share/icons/hicolor/128x128/apps/"
+          cp packaging/icons/hicolor/256x256/apps/gdsync.png "$DEB_DIR/usr/share/icons/hicolor/256x256/apps/"
+          cp packaging/icons/hicolor/256x256/apps/gdsync.png "$DEB_DIR/usr/share/gdsync/icon.png"
+          cp packaging/icons/hicolor/scalable/apps/gdsync.svg "$DEB_DIR/usr/share/gdsync/icon.svg"
+
+          cat <<EOF > "$DEB_DIR/DEBIAN/control"
+Package: gdsync
+Version: ${VERSION}
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Tiago Pujia <tiagonahuelpujia@gmail.com>
+Depends: fuse3, libfuse3-3, libssl3 | libssl3t64, libfontconfig1
+Description: Cliente Google Drive FUSE de alto rendimiento y GUI nativa en Rust
+EOF
+
+          dpkg-deb --build --root-owner-group "$DEB_DIR" "dist/gdsync_${VERSION}_amd64.deb"
+
+      - name: Upload Debian artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-debian
+          path: dist/*
+
+  build-arch:
+    name: Build Arch Linux package (.pkg.tar.zst)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies in Arch container
+        run: |
+          pacman -Syu --noconfirm rust git pkgconf fuse3 openssl fontconfig
+
+      - name: Build release binaries
+        run: cargo build --workspace --release
+
+      - name: Create Arch package (.pkg.tar.zst)
+        run: |
+          if [ -n "$GITHUB_REF_NAME" ] && [[ "$GITHUB_REF_NAME" =~ ^v[0-9] ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION=$(grep -m 1 '^version = ' Cargo.toml | cut -d '"' -f 2)
+          fi
+          mkdir -p dist
+          mkdir -p arch_pkg
+
+          cat <<EOF > arch_pkg/PKGBUILD
+pkgname=gdsync
+pkgver=${VERSION}
+pkgrel=1
+pkgdesc="Cliente Google Drive FUSE de alto rendimiento y GUI nativa en Rust"
+arch=('x86_64')
+url="https://github.com/Tiago-Pujia/gdsync"
+license=('MIT')
+depends=('fuse3' 'openssl' 'fontconfig')
+
+package() {
+  install -Dm755 "\$srcdir/../target/release/gdsync" "\$pkgdir/usr/bin/gdsync"
+  install -Dm755 "\$srcdir/../target/release/gdsyncd" "\$pkgdir/usr/bin/gdsyncd"
+  install -Dm755 "\$srcdir/../target/release/gdsync-gui" "\$pkgdir/usr/bin/gdsync-gui"
+  install -Dm644 "\$srcdir/../packaging/desktop/gdsync.desktop" "\$pkgdir/usr/share/applications/gdsync.desktop"
+  install -Dm644 "\$srcdir/../packaging/dolphin/gdsync.desktop" "\$pkgdir/usr/share/kio/servicemenus/gdsync.desktop"
+  install -Dm644 "\$srcdir/../packaging/systemd/gdsyncd.service" "\$pkgdir/usr/lib/systemd/user/gdsyncd.service"
+  install -Dm644 "\$srcdir/../packaging/icons/hicolor/scalable/apps/gdsync.svg" "\$pkgdir/usr/share/icons/hicolor/scalable/apps/gdsync.svg"
+  install -Dm644 "\$srcdir/../packaging/icons/hicolor/48x48/apps/gdsync.png" "\$pkgdir/usr/share/icons/hicolor/48x48/apps/gdsync.png"
+  install -Dm644 "\$srcdir/../packaging/icons/hicolor/128x128/apps/gdsync.png" "\$pkgdir/usr/share/icons/hicolor/128x128/apps/gdsync.png"
+  install -Dm644 "\$srcdir/../packaging/icons/hicolor/256x256/apps/gdsync.png" "\$pkgdir/usr/share/icons/hicolor/256x256/apps/gdsync.png"
+}
+EOF
+
+          useradd -m builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          chown -R builder:builder .
+          cd arch_pkg
+          su builder -c "makepkg --nodeps --noextract -f"
+          cd ..
+          cp arch_pkg/*.pkg.tar.zst dist/
+
+      - name: Upload Arch artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-arch
+          path: dist/*
+
+  build-macos:
+    name: Build macOS Universal (Apple Silicon & Intel)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build release binaries for aarch64 (Apple Silicon)
+        run: cargo build --workspace --release --target aarch64-apple-darwin
+
+      - name: Build release binaries for x86_64 (Intel Mac)
+        run: cargo build --workspace --release --target x86_64-apple-darwin
+
+      - name: Create Universal Binaries and Package
+        run: |
+          if [ -n "$GITHUB_REF_NAME" ] && [[ "$GITHUB_REF_NAME" =~ ^v[0-9] ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION=$(grep -m 1 '^version = ' Cargo.toml | cut -d '"' -f 2)
+          fi
+          PKG="gdsync-v${VERSION}-macos-universal"
+          mkdir -p "${PKG}/bin"
+          lipo -create -output "${PKG}/bin/gdsync" target/aarch64-apple-darwin/release/gdsync target/x86_64-apple-darwin/release/gdsync
+          lipo -create -output "${PKG}/bin/gdsyncd" target/aarch64-apple-darwin/release/gdsyncd target/x86_64-apple-darwin/release/gdsyncd
+          lipo -create -output "${PKG}/bin/gdsync-gui" target/aarch64-apple-darwin/release/gdsync-gui target/x86_64-apple-darwin/release/gdsync-gui
+          chmod +x "${PKG}/bin/"*
+          cp README.md "${PKG}/"
+
+          mkdir -p dist
+          tar -czf "dist/${PKG}.tar.gz" "${PKG}"
+          zip -r "dist/${PKG}.zip" "${PKG}"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos
+          path: dist/*
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-debian, build-arch, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA-256 Checksums
+        run: |
+          mkdir -p release_assets
+          cp artifacts/* release_assets/
+          cd release_assets
+          for f in *; do
+            if [ -f "$f" ]; then
+              sha256sum "$f" > "${f}.sha256"
+            fi
+          done
+          echo "=== Release Assets Ready ==="
+          ls -lh
+
+      - name: Publish or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            ${{ env.PKG_NAME }}.tar.gz
-            ${{ env.PKG_NAME }}.tar.gz.sha256
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Continuous Build (latest)' }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          files: release_assets/*
           generate_release_notes: true

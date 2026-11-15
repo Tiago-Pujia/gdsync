@@ -23,9 +23,11 @@ slint = { version = "1", default-features = false, features = [
     "renderer-femtovg",
     "renderer-software",
 ] }
-ksni = "0.3"
 rfd = "0.15"
 arboard = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = "0.3"
 
 [build-dependencies]
 slint-build = { version = "1", features = ["compat-1-18"] }

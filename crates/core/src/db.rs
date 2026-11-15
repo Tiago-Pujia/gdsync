@@ -368,21 +368,21 @@ impl Db {
         Ok(())
     }
 
-    pub fn replace_file_id(&self, old_id: &str, new_id: &str, md5: Option<&str>, mtime: i64) -> Result<()> {
+    pub fn replace_file_id(&self, old_id: &str, new_id: &str, md5: Option<&str>, mtime: i64, size: u64) -> Result<()> {
         let version = md5.map(|s| s.to_string()).unwrap_or_else(|| format!("mtime:{mtime}"));
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute(
-            "UPDATE items SET id=?1, md5=?2, mtime=?3 WHERE id=?4",
-            params![new_id, md5, mtime, old_id],
+            "UPDATE items SET id=?1, md5=?2, mtime=?3, size=CASE WHEN ?4 > 0 THEN ?4 ELSE size END WHERE id=?5",
+            params![new_id, md5, mtime, size as i64, old_id],
         )?;
         tx.execute(
             "UPDATE items SET parent_id=?1 WHERE parent_id=?2",
             params![new_id, old_id],
         )?;
         tx.execute(
-            "UPDATE cache SET id=?1, version=?3 WHERE id=?2",
-            params![new_id, old_id, version],
+            "UPDATE cache SET id=?1, version=?3, size=CASE WHEN ?4 > 0 THEN ?4 ELSE size END WHERE id=?2",
+            params![new_id, old_id, version, size as i64],
         )?;
         tx.execute(
             "UPDATE upload_queue SET file_id=?1 WHERE file_id=?2",
@@ -1117,6 +1117,26 @@ impl Db {
             .query_row("SELECT COALESCE(SUM(size),0) FROM cache", [], |r| r.get::<_, i64>(0))? as u64)
     }
 
+    pub fn cache_count(&self) -> Result<u64> {
+        Ok(self
+            .conn()
+            .query_row("SELECT COUNT(*) FROM cache", [], |r| r.get::<_, i64>(0))? as u64)
+    }
+
+    pub fn cache_update_size(&self, id: &str, size: u64) -> Result<()> {
+        self.conn().execute("UPDATE cache SET size=?2 WHERE id=?1", params![id, size as i64])?;
+        Ok(())
+    }
+
+    pub fn cache_entries(&self) -> Result<Vec<(String, String, u64)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT id, version, size FROM cache")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Eviction candidates: orphans first, then least recently used; never pinned files.
     pub fn cache_evictable(&self) -> Result<Vec<(String, u64)>> {
         let conn = self.conn();
@@ -1322,7 +1342,7 @@ mod tests {
         let ino = db.insert_local_item("local_123", Some("ROOT"), "borrador.txt", "text/plain", 50, 200).unwrap();
         assert!(db.by_id("local_123").unwrap().is_some());
 
-        db.replace_file_id("local_123", "remote_abc", Some("hash123"), 300).unwrap();
+        db.replace_file_id("local_123", "remote_abc", Some("hash123"), 300, 50).unwrap();
         assert!(db.by_id("local_123").unwrap().is_none());
 
         let replaced = db.by_id("remote_abc").unwrap().unwrap();

@@ -130,6 +130,12 @@ enum Cmd {
     Resync,
     /// Reintenta las tareas fallidas en la cola de sincronización.
     Retry,
+    /// Administra y limpia la caché local de archivos.
+    Cache {
+        /// Forzar reconciliación y desalojo de archivos que exceden el límite
+        #[arg(short, long)]
+        clean: bool,
+    },
     /// Administra el inicio automático con el sistema al iniciar sesión.
     Autostart {
         #[command(subcommand)]
@@ -1067,6 +1073,49 @@ async fn main() -> Result<()> {
                     .args(["-USR1", "-x", "gdsyncd"])
                     .status();
             }
+        }
+
+        Cmd::Cache { clean: _ } => {
+            if !db_path().exists() {
+                println!("No existe base de datos local de gdsync.");
+                return Ok(());
+            }
+            let cfg = Config::load()?;
+            let drive = Arc::new(Drive::new(cfg.clone())?);
+            let db = Arc::new(Db::open(&db_path())?);
+            let cache = Cache::new(
+                cache_dir().join("blobs"),
+                db.clone(),
+                drive,
+                cfg.cache_max_gb * 1024 * 1024 * 1024,
+            )?;
+            println!("Reconciliando caché en disco con la base de datos...");
+            let stats = cache.reconcile()?;
+            println!("✓ Reconciliación completada:");
+            if stats.removed_part_files > 0 {
+                println!("  • Archivos temporales (.part) eliminados: {}", stats.removed_part_files);
+            }
+            if stats.fixed_sizes > 0 {
+                println!("  • Metadatos de tamaño corregidos en DB:   {}", stats.fixed_sizes);
+            }
+            if stats.recovered_orphans > 0 {
+                println!("  • Archivos huérfanos reincorporados:     {}", stats.recovered_orphans);
+            }
+            if stats.removed_orphans > 0 {
+                println!("  • Archivos desconocidos eliminados:       {}", stats.removed_orphans);
+            }
+            if stats.removed_phantoms > 0 {
+                println!("  • Registros fantasma depurados de DB:     {}", stats.removed_phantoms);
+            }
+            if stats.evicted_bytes > 0 {
+                println!("  • Espacio liberado por límite de cuota:   {:.2} MB", stats.evicted_bytes as f64 / 1_000_000.0);
+            }
+            println!(
+                "Estado actual: {:.2} MB en caché ({} archivos) | Límite: {} GB",
+                db.cache_total()? as f64 / 1_000_000.0,
+                db.cache_count()?,
+                cfg.cache_max_gb
+            );
         }
 
         Cmd::Autostart { sub } => {

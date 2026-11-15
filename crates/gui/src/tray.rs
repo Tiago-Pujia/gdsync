@@ -1,6 +1,8 @@
-use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
 use ksni::menu::{MenuItem, StandardItem};
+#[cfg(target_os = "linux")]
 use ksni::{Category, Status, ToolTip, Tray};
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct GdsyncTray {
@@ -11,6 +13,14 @@ pub struct GdsyncTray {
     pub quit_cb: Arc<dyn Fn() + Send + Sync + 'static>,
 }
 
+#[cfg(not(target_os = "linux"))]
+impl GdsyncTray {
+    pub async fn spawn(self) -> Result<(), ()> {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl Tray for GdsyncTray {
     fn id(&self) -> String {
         "gdsync".into()

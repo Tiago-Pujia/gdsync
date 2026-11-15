@@ -53,6 +53,7 @@ fn main() -> Result<()> {
         drive.clone(),
         cfg.cache_max_gb * 1024 * 1024 * 1024,
     )?);
+    let _ = cache.reconcile();
 
     let total_space = Arc::new(AtomicU64::new(15 * 1024 * 1024 * 1024)); // 15 GB default
     let used_space = Arc::new(AtomicU64::new(0));
@@ -93,6 +94,7 @@ fn main() -> Result<()> {
             loop {
                 // Reload configuration dynamically to detect changes in sync_folders or intervals
                 let active_cfg = Config::load().unwrap_or_else(|_| cfg_clone.clone());
+                cache.set_max_bytes(active_cfg.cache_max_gb * 1024 * 1024 * 1024);
                 let sleep_duration = Duration::from_secs(active_cfg.poll_interval_secs.max(5));
 
                 // 0. Auto-retry failed uploads periodically if enabled
@@ -157,6 +159,13 @@ fn main() -> Result<()> {
                         let _ = db.kv_set("storage_total", &total.to_string());
                         let _ = db.kv_set("storage_used", &used.to_string());
                     }
+                }
+
+                // 4. Periodic cache maintenance
+                if tick % 60 == 0 {
+                    let _ = cache.reconcile();
+                } else {
+                    cache.evict();
                 }
 
                 tokio::select! {

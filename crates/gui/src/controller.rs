@@ -210,7 +210,7 @@ impl GuiController {
                             if let Some(drive) = this.get_drive() {
                                 let db = this.db.clone();
                                 tokio::spawn(async move {
-                                    let cache_dir = config::cache_dir();
+                                    let cache_dir = config::cache_dir().join("blobs");
                                     for item in unpinned_files {
                                         let dest = cache_dir.join(&item.id);
                                         if !dest.exists() {
@@ -727,6 +727,8 @@ impl GuiController {
         app.set_cache_used_str(format_bytes(cache_bytes).into());
         app.set_cache_limit_str(format!("{} GB", cache_max_gb).into());
         app.set_cache_pct(cache_pct);
+        let cache_files_count = self.db.cache_count().unwrap_or(0);
+        app.set_cache_files_count(cache_files_count as i32);
 
         let pinned_count = self.db.count_pinned_items().unwrap_or(0);
         app.set_pinned_count(pinned_count as i32);
