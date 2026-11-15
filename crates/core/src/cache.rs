@@ -232,10 +232,9 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
 
     fn test_drive() -> Arc<Drive> {
-        Arc::new(Drive::new(Config::new("cid".into(), "sec".into())).unwrap())
+        Arc::new(Drive::for_test())
     }
 
     #[test]

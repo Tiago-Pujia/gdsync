@@ -12,8 +12,8 @@ permissions:
   contents: write
 
 jobs:
-  build-debian:
-    name: Build Debian/Ubuntu (.deb & tar.gz)
+  build-linux:
+    name: Build Linux (Debian, Arch & Universal)
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -30,17 +30,20 @@ jobs:
       - name: Build release binaries
         run: cargo build --workspace --release
 
-      - name: Package .deb and tar.gz
+      - name: Extract version
+        id: version
         run: |
           if [ -n "$GITHUB_REF_NAME" ] && [[ "$GITHUB_REF_NAME" =~ ^v[0-9] ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
             VERSION=$(grep -m 1 '^version = ' Cargo.toml | cut -d '"' -f 2)
           fi
-          echo "Building packages for version ${VERSION}..."
-          mkdir -p dist
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
 
-          # 1. Universal Linux tar.gz bundle
+      - name: Package Universal Linux tar.gz
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          mkdir -p dist
           PKG_NAME="gdsync-v${VERSION}-linux-x86_64"
           mkdir -p "${PKG_NAME}/bin" "${PKG_NAME}/packaging"
           cp target/release/gdsync "${PKG_NAME}/bin/"
@@ -53,7 +56,9 @@ jobs:
           chmod +x "${PKG_NAME}/install.sh" "${PKG_NAME}/uninstall.sh" "${PKG_NAME}/bin/"*
           tar -czf "dist/${PKG_NAME}.tar.gz" "${PKG_NAME}"
 
-          # 2. Debian .deb package
+      - name: Package Debian (.deb)
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
           DEB_DIR="deb_pkg"
           mkdir -p "$DEB_DIR/DEBIAN"
           mkdir -p "$DEB_DIR/usr/bin"
@@ -79,87 +84,25 @@ jobs:
           cp packaging/icons/hicolor/256x256/apps/gdsync.png "$DEB_DIR/usr/share/gdsync/icon.png"
           cp packaging/icons/hicolor/scalable/apps/gdsync.svg "$DEB_DIR/usr/share/gdsync/icon.svg"
 
-          cat <<EOF > "$DEB_DIR/DEBIAN/control"
-Package: gdsync
-Version: ${VERSION}
-Section: utils
-Priority: optional
-Architecture: amd64
-Maintainer: Tiago Pujia <tiagonahuelpujia@gmail.com>
-Depends: fuse3, libfuse3-3, libssl3 | libssl3t64, libfontconfig1
-Description: Cliente Google Drive FUSE de alto rendimiento y GUI nativa en Rust
-EOF
-
+          sed "s/@VERSION@/${VERSION}/g" packaging/debian/control.in > "$DEB_DIR/DEBIAN/control"
           dpkg-deb --build --root-owner-group "$DEB_DIR" "dist/gdsync_${VERSION}_amd64.deb"
 
-      - name: Upload Debian artifacts
+      - name: Package Arch Linux (.pkg.tar.zst)
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          mkdir -p arch_work
+          sed "s/@VERSION@/${VERSION}/g" packaging/arch/PKGBUILD.in > arch_work/PKGBUILD
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            -w "/workspace/arch_work" \
+            archlinux:base-devel \
+            bash -c "useradd -m builder && chown -R builder:builder /workspace && su builder -c 'makepkg --nodeps --noextract -f'"
+          cp arch_work/*.pkg.tar.zst dist/
+
+      - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist-debian
-          path: dist/*
-
-  build-arch:
-    name: Build Arch Linux package (.pkg.tar.zst)
-    runs-on: ubuntu-latest
-    container:
-      image: archlinux:base-devel
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install dependencies in Arch container
-        run: |
-          pacman -Syu --noconfirm rust git pkgconf fuse3 openssl fontconfig
-
-      - name: Build release binaries
-        run: cargo build --workspace --release
-
-      - name: Create Arch package (.pkg.tar.zst)
-        run: |
-          if [ -n "$GITHUB_REF_NAME" ] && [[ "$GITHUB_REF_NAME" =~ ^v[0-9] ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION=$(grep -m 1 '^version = ' Cargo.toml | cut -d '"' -f 2)
-          fi
-          mkdir -p dist
-          mkdir -p arch_pkg
-
-          cat <<EOF > arch_pkg/PKGBUILD
-pkgname=gdsync
-pkgver=${VERSION}
-pkgrel=1
-pkgdesc="Cliente Google Drive FUSE de alto rendimiento y GUI nativa en Rust"
-arch=('x86_64')
-url="https://github.com/Tiago-Pujia/gdsync"
-license=('MIT')
-depends=('fuse3' 'openssl' 'fontconfig')
-
-package() {
-  install -Dm755 "\$srcdir/../target/release/gdsync" "\$pkgdir/usr/bin/gdsync"
-  install -Dm755 "\$srcdir/../target/release/gdsyncd" "\$pkgdir/usr/bin/gdsyncd"
-  install -Dm755 "\$srcdir/../target/release/gdsync-gui" "\$pkgdir/usr/bin/gdsync-gui"
-  install -Dm644 "\$srcdir/../packaging/desktop/gdsync.desktop" "\$pkgdir/usr/share/applications/gdsync.desktop"
-  install -Dm644 "\$srcdir/../packaging/dolphin/gdsync.desktop" "\$pkgdir/usr/share/kio/servicemenus/gdsync.desktop"
-  install -Dm644 "\$srcdir/../packaging/systemd/gdsyncd.service" "\$pkgdir/usr/lib/systemd/user/gdsyncd.service"
-  install -Dm644 "\$srcdir/../packaging/icons/hicolor/scalable/apps/gdsync.svg" "\$pkgdir/usr/share/icons/hicolor/scalable/apps/gdsync.svg"
-  install -Dm644 "\$srcdir/../packaging/icons/hicolor/48x48/apps/gdsync.png" "\$pkgdir/usr/share/icons/hicolor/48x48/apps/gdsync.png"
-  install -Dm644 "\$srcdir/../packaging/icons/hicolor/128x128/apps/gdsync.png" "\$pkgdir/usr/share/icons/hicolor/128x128/apps/gdsync.png"
-  install -Dm644 "\$srcdir/../packaging/icons/hicolor/256x256/apps/gdsync.png" "\$pkgdir/usr/share/icons/hicolor/256x256/apps/gdsync.png"
-}
-EOF
-
-          useradd -m builder
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-          chown -R builder:builder .
-          cd arch_pkg
-          su builder -c "makepkg --nodeps --noextract -f"
-          cd ..
-          cp arch_pkg/*.pkg.tar.zst dist/
-
-      - name: Upload Arch artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist-arch
+          name: dist-linux
           path: dist/*
 
   build-macos:
@@ -174,28 +117,48 @@ EOF
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - name: Build release binaries for aarch64 (Apple Silicon)
+      - name: Install dependencies (macOS)
+        run: |
+          brew install --cask macfuse || true
+          brew install pkgconf
+
+      - name: Build Apple Silicon release binaries (aarch64)
         run: cargo build --workspace --release --target aarch64-apple-darwin
 
-      - name: Build release binaries for x86_64 (Intel Mac)
-        run: cargo build --workspace --release --target x86_64-apple-darwin
+      - name: Build Intel Mac release binaries (x86_64)
+        id: build_intel
+        run: |
+          if cargo build --workspace --release --target x86_64-apple-darwin; then
+            echo "intel_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "intel_ok=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Create Universal Binaries and Package
+      - name: Create macOS bundle
         run: |
           if [ -n "$GITHUB_REF_NAME" ] && [[ "$GITHUB_REF_NAME" =~ ^v[0-9] ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
             VERSION=$(grep -m 1 '^version = ' Cargo.toml | cut -d '"' -f 2)
           fi
-          PKG="gdsync-v${VERSION}-macos-universal"
-          mkdir -p "${PKG}/bin"
-          lipo -create -output "${PKG}/bin/gdsync" target/aarch64-apple-darwin/release/gdsync target/x86_64-apple-darwin/release/gdsync
-          lipo -create -output "${PKG}/bin/gdsyncd" target/aarch64-apple-darwin/release/gdsyncd target/x86_64-apple-darwin/release/gdsyncd
-          lipo -create -output "${PKG}/bin/gdsync-gui" target/aarch64-apple-darwin/release/gdsync-gui target/x86_64-apple-darwin/release/gdsync-gui
+
+          mkdir -p dist
+          if [ "${{ steps.build_intel.outputs.intel_ok }}" = "true" ]; then
+            PKG="gdsync-v${VERSION}-macos-universal"
+            mkdir -p "${PKG}/bin"
+            lipo -create -output "${PKG}/bin/gdsync" target/aarch64-apple-darwin/release/gdsync target/x86_64-apple-darwin/release/gdsync
+            lipo -create -output "${PKG}/bin/gdsyncd" target/aarch64-apple-darwin/release/gdsyncd target/x86_64-apple-darwin/release/gdsyncd
+            lipo -create -output "${PKG}/bin/gdsync-gui" target/aarch64-apple-darwin/release/gdsync-gui target/x86_64-apple-darwin/release/gdsync-gui
+          else
+            PKG="gdsync-v${VERSION}-macos-arm64"
+            mkdir -p "${PKG}/bin"
+            cp target/aarch64-apple-darwin/release/gdsync "${PKG}/bin/"
+            cp target/aarch64-apple-darwin/release/gdsyncd "${PKG}/bin/"
+            cp target/aarch64-apple-darwin/release/gdsync-gui "${PKG}/bin/"
+          fi
           chmod +x "${PKG}/bin/"*
           cp README.md "${PKG}/"
 
-          mkdir -p dist
           tar -czf "dist/${PKG}.tar.gz" "${PKG}"
           zip -r "dist/${PKG}.zip" "${PKG}"
 
@@ -207,7 +170,7 @@ EOF
 
   publish-release:
     name: Publish GitHub Release
-    needs: [build-debian, build-arch, build-macos]
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -221,7 +184,7 @@ EOF
           path: artifacts
           merge-multiple: true
 
-      - name: Generate SHA-256 Checksums
+      - name: Prepare Release Assets & Checksums
         run: |
           mkdir -p release_assets
           cp artifacts/* release_assets/
@@ -234,11 +197,24 @@ EOF
           echo "=== Release Assets Ready ==="
           ls -lh
 
+      - name: Determine Release Metadata
+        id: meta
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag_name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "release_name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag_name=latest" >> "$GITHUB_OUTPUT"
+            echo "release_name=Continuous Build (latest)" >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
-          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Continuous Build (latest)' }}
-          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: ${{ steps.meta.outputs.release_name }}
+          prerelease: ${{ steps.meta.outputs.is_prerelease == 'true' }}
           files: release_assets/*
           generate_release_notes: true

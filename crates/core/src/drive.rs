@@ -125,6 +125,19 @@ impl Drive {
         })
     }
 
+    #[cfg(test)]
+    pub fn for_test() -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            cfg: Config::new("cid".into(), "sec".into()),
+            token: Mutex::new(Token {
+                access_token: "test".into(),
+                refresh_token: "test".into(),
+                expires_at: i64::MAX,
+            }),
+        }
+    }
+
     async fn bearer(&self) -> Result<String> {
         let mut t = self.token.lock().await;
         if t.expires_at - 60 < now() {
