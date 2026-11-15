@@ -4,6 +4,7 @@ use ksni::menu::{MenuItem, StandardItem};
 use ksni::{Category, Status, ToolTip, Tray};
 use std::sync::{Arc, Mutex};
 
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct GdsyncTray {
     pub status_text: Arc<Mutex<String>>,
@@ -14,6 +15,7 @@ pub struct GdsyncTray {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 impl GdsyncTray {
     pub async fn spawn(self) -> Result<(), ()> {
         Ok(())

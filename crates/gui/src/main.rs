@@ -125,10 +125,7 @@ fn main() -> Result<()> {
     };
 
     let _tray_handle = rt.spawn(async move {
-        #[cfg(target_os = "linux")]
         let _ = tray_inst.spawn().await;
-        #[cfg(not(target_os = "linux"))]
-        drop(tray_inst);
     });
 
     if let Some(ref target) = share_target {

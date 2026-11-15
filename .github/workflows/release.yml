@@ -91,13 +91,14 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           sed "s/@VERSION@/${VERSION}/g" packaging/arch/PKGBUILD.in > PKGBUILD
+          HOST_UID=$(id -u)
+          HOST_GID=$(id -g)
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/workspace" \
             -w "/workspace" \
             archlinux:base-devel \
-            bash -c "useradd -m builder && chown -R builder:builder /workspace && su builder -c 'makepkg --nodeps --noextract -f'"
-          cp gdsync-*.pkg.tar.zst dist/
-          rm -f PKGBUILD gdsync-*.pkg.tar.zst
+            bash -c "useradd -m builder && chown -R builder:builder /workspace && su builder -c 'makepkg --nodeps --noextract -f' && mv gdsync-*.pkg.tar.zst dist/ && chown -R ${HOST_UID}:${HOST_GID} /workspace"
+          rm -f PKGBUILD
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
