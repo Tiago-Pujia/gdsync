@@ -104,8 +104,17 @@ struct StorageQuota {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AboutUser {
+    email_address: Option<String>,
+    #[allow(dead_code)]
+    display_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AboutResponse {
     storage_quota: Option<StorageQuota>,
+    user: Option<AboutUser>,
 }
 
 pub struct Drive {
@@ -352,13 +361,20 @@ impl Drive {
         download_res
     }
 
-    /// Query Drive storage quota: returns (used_bytes, total_limit_bytes).
-    pub async fn about_storage(&self) -> Result<(u64, u64)> {
-        let resp = self.get(&format!("{API}/about"), &[("fields", "storageQuota")]).await?;
+    /// Query Drive storage quota and user email: returns (used_bytes, total_limit_bytes, email).
+    pub async fn about_info(&self) -> Result<(u64, u64, Option<String>)> {
+        let resp = self.get(&format!("{API}/about"), &[("fields", "storageQuota,user(emailAddress,displayName)")]).await?;
         let about: AboutResponse = resp.json().await?;
         let quota = about.storage_quota.unwrap_or(StorageQuota { limit: None, usage: None });
         let usage = quota.usage.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
         let limit = quota.limit.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(10 * 1024 * 1024 * 1024 * 1024); // 10 TB fallback if unlimited
+        let email = about.user.and_then(|u| u.email_address).filter(|e| !e.trim().is_empty());
+        Ok((usage, limit, email))
+    }
+
+    /// Query Drive storage quota: returns (used_bytes, total_limit_bytes).
+    pub async fn about_storage(&self) -> Result<(u64, u64)> {
+        let (usage, limit, _) = self.about_info().await?;
         Ok((usage, limit))
     }
 

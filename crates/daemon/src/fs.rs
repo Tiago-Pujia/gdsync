@@ -127,6 +127,41 @@ impl DriveFs {
         self.handles.lock().unwrap().insert(fh, f);
         fh
     }
+
+    /// True if `dir` itself or any ancestor is a local-only temporary folder (e.g. `.Trash-1000`).
+    fn is_local_temp_folder(&self, dir: &Item) -> bool {
+        let mut curr = Some(dir.clone());
+        let mut hops = 0;
+        while let Some(it) = curr {
+            if hops > 32 {
+                break;
+            }
+            hops += 1;
+            if it.id.starts_with("local_") && is_temp_file(&it.name) {
+                return true;
+            }
+            curr = it.parent_id.as_deref().and_then(|pid| self.db.by_id(pid).ok().flatten());
+        }
+        false
+    }
+
+    /// True if `name` is temporary or lives inside a local-only temporary folder (e.g. `.Trash-1000/files`).
+    fn is_temp_context(&self, parent: &Item, name: &str) -> bool {
+        is_temp_file(name) || self.is_local_temp_folder(parent)
+    }
+
+    /// True if `item` itself is temporary or lives inside a local-only temporary folder.
+    fn is_temp_item(&self, item: &Item) -> bool {
+        if is_temp_file(&item.name) {
+            return true;
+        }
+        if let Some(pid) = item.parent_id.as_deref() {
+            if let Ok(Some(parent)) = self.db.by_id(pid) {
+                return self.is_local_temp_folder(&parent);
+            }
+        }
+        false
+    }
 }
 
 fn kind(item: &Item) -> FileType {
@@ -225,13 +260,26 @@ impl Filesystem for DriveFs {
                         }
                     }
                 }
-                if !found && path.exists() {
-                    let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_len(new_size));
+                if !found {
+                    if !path.exists() {
+                        if new_size == 0 {
+                            let _ = File::create(&path);
+                        } else {
+                            let _ = self.rt.block_on(self.cache.ensure(&item));
+                        }
+                    }
+                    if path.exists() {
+                        let _ = OpenOptions::new().write(true).open(&path).and_then(|f| f.set_len(new_size));
+                    }
                 }
                 found
             };
-            let _ = self.db.update_item_size_mtime(&item.id, new_size, gdsync_core::now());
-            if !has_open_writer && !is_temp_file(&item.name) {
+            let now = gdsync_core::now();
+            let _ = self.db.update_item_size_mtime(&item.id, new_size, now);
+            if !has_open_writer && !self.is_temp_item(&item) {
+                if path.exists() {
+                    let _ = self.db.cache_put(&item.id, &format!("mtime:{now}"), new_size);
+                }
                 let op = if item.id.starts_with("local_") { "create" } else { "update" };
                 self.enqueue(&item.id, op, None);
             }
@@ -369,7 +417,7 @@ impl Filesystem for DriveFs {
             Ok(i) => i,
             Err(_) => return reply.error(EIO),
         };
-        if !is_temp_file(&name_str) {
+        if !self.is_temp_context(&parent_item, &name_str) {
             self.enqueue(&local_id, "mkdir", None);
         }
 
@@ -453,7 +501,7 @@ impl Filesystem for DriveFs {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        let is_temp = self.item(ino).map(|i| is_temp_file(&i.name)).unwrap_or(false);
+        let is_temp = self.item(ino).map(|i| self.is_temp_item(&i)).unwrap_or(false);
         let mut handles = self.handles.lock().unwrap();
         if let Some(OpenFile::DiskRw { file, item_id, dirty }) = handles.remove(&fh) {
             if dirty && !is_temp {
@@ -607,7 +655,7 @@ impl Filesystem for DriveFs {
                         }
                     }
                 }
-                if !is_temp_file(&newname_str) {
+                if !self.is_temp_context(&newparent_item, &newname_str) {
                     self.enqueue(&existing.id, "update", None);
                 }
                 return reply.ok();
@@ -623,20 +671,30 @@ impl Filesystem for DriveFs {
             }
         }
 
+        // Moving a remote item into a local-only temp/trash directory (e.g. Dolphin's .Trash-1000)
+        // cannot be represented as a remote move because the destination parent does not exist on Drive.
+        if !item.id.starts_with("local_") && self.is_local_temp_folder(&newparent_item) {
+            let payload = serde_json::json!({ "name": item.name }).to_string();
+            let _ = self.db.remove(&item.id);
+            self.cache.forget(&item.id);
+            self.enqueue(&item.id, "trash", Some(&payload));
+            return reply.ok();
+        }
+
         let moved_parent = if parent != newparent { Some(newparent_item.id.as_str()) } else { None };
         if let Err(_) = self.db.rename_item(&item.id, &newname_str, moved_parent) {
             return reply.error(EIO);
         }
 
         if item.id.starts_with("local_") {
-            if is_temp_file(&newname_str) {
+            if self.is_temp_context(&newparent_item, &newname_str) {
                 let _ = self.db.cancel_uploads(&item.id);
             } else {
                 let op = if item.is_dir() { "mkdir" } else { "create" };
                 self.enqueue(&item.id, op, None);
             }
         } else {
-            if item.name != newname_str && !is_temp_file(&newname_str) {
+            if item.name != newname_str && !self.is_temp_context(&newparent_item, &newname_str) {
                 let payload = serde_json::json!({ "name": newname_str }).to_string();
                 self.enqueue(&item.id, "rename", Some(&payload));
             }

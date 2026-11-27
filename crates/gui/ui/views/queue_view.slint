@@ -178,6 +178,26 @@ export component QueueView inherits VerticalLayout {
                                     badge-color: Theme.text-secondary;
                                     badge-bg: Theme.bg-surface;
                                 }
+                                if item.op == "rename" : Badge {
+                                    text: "RENOMBRAR";
+                                    badge-color: Theme.text-secondary;
+                                    badge-bg: Theme.bg-surface;
+                                }
+                                if item.op == "move" : Badge {
+                                    text: "MOVER";
+                                    badge-color: Theme.text-secondary;
+                                    badge-bg: Theme.bg-surface;
+                                }
+                                if item.op == "shortcut" : Badge {
+                                    text: "ATAJO";
+                                    badge-color: Theme.accent;
+                                    badge-bg: Theme.accent.transparentize(0.85);
+                                }
+                                if item.op != "create" && item.op != "update" && item.op != "trash" && item.op != "mkdir" && item.op != "rename" && item.op != "move" && item.op != "shortcut" : Badge {
+                                    text: item.op;
+                                    badge-color: Theme.text-secondary;
+                                    badge-bg: Theme.bg-surface;
+                                }
                             }
 
                             // Display Name

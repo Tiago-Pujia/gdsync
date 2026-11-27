@@ -7,7 +7,7 @@ Wants=network-online.target
 ExecStart=%h/.local/bin/gdsyncd
 Restart=on-failure
 RestartSec=10
-ExecStopPost=-/bin/sh -c 'M=$(sed -n "s/.*\"mount_point\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "${XDG_CONFIG_HOME:-$HOME/.config}/gdsync/config.json" 2>/dev/null); fusermount3 -uz "${M:-$HOME/GoogleDrive}" 2>/dev/null || true'
+ExecStopPost=-/bin/sh -c 'M=$(grep -m1 mount_point "${XDG_CONFIG_HOME:-$HOME/.config}/gdsync/config.json" 2>/dev/null | sed -e "s/^[^:]*:[[:space:]]*//" -e "s/,[[:space:]]*$//" -e "s/^.//" -e "s/.$//"); fusermount3 -uz "${M:-$HOME/GoogleDrive}" 2>/dev/null || true'
 
 [Install]
 WantedBy=default.target

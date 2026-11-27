@@ -167,6 +167,7 @@ pub fn is_temp_file(name: &str) -> bool {
         || name.ends_with(".part")
         || name.ends_with(".crdownload")
         || name.ends_with(".tmp")
+        || name.ends_with(".trashinfo")
         || matches!(name, ".DS_Store" | "Thumbs.db" | "4913")
 }
 

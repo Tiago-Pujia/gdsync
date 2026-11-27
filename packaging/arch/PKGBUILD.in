@@ -16,6 +16,7 @@ package() {
   install -Dm644 "$startdir/packaging/desktop/gdsync.desktop" "$pkgdir/usr/share/applications/gdsync.desktop"
   install -Dm644 "$startdir/packaging/dolphin/gdsync.desktop" "$pkgdir/usr/share/kio/servicemenus/gdsync.desktop"
   install -Dm644 "$startdir/packaging/systemd/gdsyncd.service" "$pkgdir/usr/lib/systemd/user/gdsyncd.service"
+  sed -i "s|^ExecStart=.*|ExecStart=/usr/bin/gdsyncd|g" "$pkgdir/usr/lib/systemd/user/gdsyncd.service"
   install -Dm644 "$startdir/packaging/icons/hicolor/scalable/apps/gdsync.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/gdsync.svg"
   install -Dm644 "$startdir/packaging/icons/hicolor/48x48/apps/gdsync.png" "$pkgdir/usr/share/icons/hicolor/48x48/apps/gdsync.png"
   install -Dm644 "$startdir/packaging/icons/hicolor/128x128/apps/gdsync.png" "$pkgdir/usr/share/icons/hicolor/128x128/apps/gdsync.png"

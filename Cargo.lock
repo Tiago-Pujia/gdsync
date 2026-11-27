@@ -1558,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "gdsync"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "clap",
@@ -1572,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "gdsync-core"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1589,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "gdsync-gui"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "gdsyncd"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "clap",

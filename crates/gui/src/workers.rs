@@ -82,32 +82,63 @@ pub fn fetch_journal_logs(line_count: usize) -> Vec<ParsedLogLine> {
             let _tag = parts.next();
             let msg_raw = parts.next().unwrap_or(line);
 
-            let time_short = if timestamp_raw.len() >= 19 {
+            let time_short = if timestamp_raw.len() >= 19 && timestamp_raw.as_bytes().get(10) == Some(&b'T') {
                 &timestamp_raw[11..19]
             } else {
                 timestamp_raw
             };
 
-            let (level, level_color_code, msg) = if msg_raw.contains("[ERROR]") || msg_raw.contains("ERROR:") {
-                ("[ERROR]", 3, msg_raw)
-            } else if msg_raw.contains("[WARN]") || msg_raw.contains("WARN:") {
-                ("[WARN]", 2, msg_raw)
-            } else if msg_raw.contains("[OK]") || msg_raw.contains("SUCCESS") || msg_raw.contains("exitosamente") {
-                ("[OK]", 1, msg_raw)
+            let clean_msg = strip_tracing_prefix(msg_raw);
+
+            let (level, level_color_code) = if msg_raw.contains(" ERROR ")
+                || msg_raw.contains("[ERROR]")
+                || msg_raw.contains("ERROR:")
+            {
+                ("[ERROR]", 3)
+            } else if msg_raw.contains(" WARN ")
+                || msg_raw.contains("[WARN]")
+                || msg_raw.contains("WARN:")
+            {
+                ("[WARN]", 2)
+            } else if msg_raw.contains("[OK]")
+                || msg_raw.contains("SUCCESS")
+                || msg_raw.contains("exitosamente")
+                || msg_raw.contains("montado en modo")
+                || msg_raw.contains("árbol listo")
+            {
+                ("[OK]", 1)
             } else {
-                ("[INFO]", 0, msg_raw)
+                ("[INFO]", 0)
             };
 
             result.push(ParsedLogLine {
                 timestamp: format!("[{}]", time_short),
                 level: level.to_string(),
                 level_color_code,
-                message: msg.to_string(),
+                message: clean_msg.to_string(),
             });
         }
     }
 
     result
+}
+
+fn strip_tracing_prefix(msg: &str) -> &str {
+    // Strip leading UTC ISO timestamp + level emitted by tracing_subscriber, e.g.:
+    // "2026-11-27T19:44:14.925252Z  INFO gdsync_core::cache: ..."
+    let trimmed = msg.trim_start();
+    if trimmed.len() > 20 && trimmed.as_bytes().get(10) == Some(&b'T') {
+        if let Some(after_z) = trimmed.split_once("Z ") {
+            let rest = after_z.1.trim_start();
+            for lvl in ["ERROR ", "WARN ", "INFO ", "DEBUG ", "TRACE "] {
+                if let Some(stripped) = rest.strip_prefix(lvl) {
+                    return stripped.trim_start();
+                }
+            }
+            return rest;
+        }
+    }
+    trimmed
 }
 
 pub fn perform_resync(mount_point: &Path) -> Result<()> {

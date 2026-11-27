@@ -58,12 +58,15 @@ fn main() -> Result<()> {
     let total_space = Arc::new(AtomicU64::new(15 * 1024 * 1024 * 1024)); // 15 GB default
     let used_space = Arc::new(AtomicU64::new(0));
 
-    // Try fetching initial quota from Drive
-    if let Ok((used, total)) = rt.block_on(drive.about_storage()) {
+    // Try fetching initial quota & user email from Drive
+    if let Ok((used, total, email)) = rt.block_on(drive.about_info()) {
         total_space.store(total, Ordering::Relaxed);
         used_space.store(used, Ordering::Relaxed);
         let _ = db.kv_set("storage_total", &total.to_string());
         let _ = db.kv_set("storage_used", &used.to_string());
+        if let Some(em) = email {
+            let _ = db.kv_set("account_email", &em);
+        }
     }
 
     rt.block_on(sync::initial_sync(&drive, &db, &cfg))?;
@@ -127,11 +130,13 @@ fn main() -> Result<()> {
                     }
                 }
                 if total_uploaded > 0 && active_cfg.notifications_enabled {
-                    let gui_active = std::path::Path::new("/tmp/gdsync_gui_ipc").exists()
-                        || std::env::var("XDG_RUNTIME_DIR")
-                            .map(|d| std::path::Path::new(&d).join("gdsync_gui_ipc").exists())
-                            .unwrap_or(false);
-                    if !gui_active {
+                    let gui_sock = std::env::var("XDG_RUNTIME_DIR")
+                        .map(|d| PathBuf::from(d).join("gdsync_gui.sock"))
+                        .unwrap_or_else(|_| {
+                            let uid = unsafe { libc::getuid() };
+                            PathBuf::from(format!("/tmp/gdsync_gui_{}.sock", uid))
+                        });
+                    if !gui_sock.exists() {
                         let _ = std::process::Command::new("notify-send")
                             .args([
                                 "-a", "gdsync",
@@ -150,14 +155,17 @@ fn main() -> Result<()> {
                     Err(e) => warn!("no se pudieron consultar cambios remotos: {e:#}"),
                 }
 
-                // 3. Refresh storage quota every ~5 minutes
+                // 3. Refresh storage quota & email every ~5 minutes
                 tick += 1;
                 if tick % 10 == 0 {
-                    if let Ok((used, total)) = drive.about_storage().await {
+                    if let Ok((used, total, email)) = drive.about_info().await {
                         total_s.store(total, Ordering::Relaxed);
                         used_s.store(used, Ordering::Relaxed);
                         let _ = db.kv_set("storage_total", &total.to_string());
                         let _ = db.kv_set("storage_used", &used.to_string());
+                        if let Some(em) = email {
+                            let _ = db.kv_set("account_email", &em);
+                        }
                     }
                 }
 

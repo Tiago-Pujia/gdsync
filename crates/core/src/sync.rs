@@ -225,7 +225,13 @@ where
                 "trash" => {
                     info!("enviando a la papelera '{}'", task.file_id);
                     if !task.file_id.starts_with("local_") {
-                        let _ = drive.trash_remote_file(&task.file_id).await;
+                        if let Err(e) = drive.trash_remote_file(&task.file_id).await {
+                            let msg = e.to_string();
+                            if !msg.contains("404") {
+                                return Err(e);
+                            }
+                            debug!("elemento '{}' ya no existía en Drive al enviar a papelera", task.file_id);
+                        }
                     }
                     db.complete_upload(task.id)?;
                     done += 1;
@@ -235,7 +241,13 @@ where
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
                             if let Some(new_name) = v.get("name").and_then(|n| n.as_str()) {
                                 if !task.file_id.starts_with("local_") {
-                                    let _ = drive.rename_remote_file(&task.file_id, new_name).await;
+                                    if let Err(e) = drive.rename_remote_file(&task.file_id, new_name).await {
+                                        let msg = e.to_string();
+                                        if !msg.contains("404") {
+                                            return Err(e);
+                                        }
+                                        debug!("elemento '{}' ya no existía en Drive al renombrar", task.file_id);
+                                    }
                                 }
                             }
                         }
@@ -251,7 +263,13 @@ where
                                 v.get("old_parent").and_then(|n| n.as_str()),
                             ) {
                                 if !task.file_id.starts_with("local_") {
-                                    let _ = drive.move_remote_file(&task.file_id, new_parent, old_parent).await;
+                                    if let Err(e) = drive.move_remote_file(&task.file_id, new_parent, old_parent).await {
+                                        let msg = e.to_string();
+                                        if !msg.contains("404") {
+                                            return Err(e);
+                                        }
+                                        debug!("elemento '{}' ya no existía en Drive al mover", task.file_id);
+                                    }
                                 }
                             }
                         }

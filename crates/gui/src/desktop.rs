@@ -13,12 +13,20 @@ pub fn is_daemon_running() -> bool {
         }
     }
 
-    // Fallback to pgrep
-    if let Ok(output) = Command::new("pgrep").args(["-f", "gdsyncd"]).output() {
+    // Fallback to pgrep exact process name
+    if let Ok(output) = Command::new("pgrep").args(["-x", "gdsyncd"]).output() {
         return !output.stdout.is_empty();
     }
 
     false
+}
+
+pub fn trigger_daemon_sync() -> bool {
+    Command::new("pkill")
+        .args(["-USR1", "-x", "gdsyncd"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 pub fn start_daemon() -> bool {
@@ -77,7 +85,7 @@ Type=Application\n\
 Name=gdsync\n\
 Comment=Google Drive FUSE Client\n\
 Exec=gdsync-gui --minimized\n\
-Icon=folder-gdrive\n\
+Icon=gdsync\n\
 Terminal=false\n\
 Categories=Utility;Network;\n\
 X-GNOME-Autostart-enabled=true\n";

@@ -51,6 +51,20 @@ pub struct Config {
 fn default_mount() -> PathBuf {
     dirs::home_dir().expect("sin HOME").join("GoogleDrive")
 }
+
+/// Expands a leading `~` or `~/` to the user's home directory.
+pub fn expand_tilde(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if s == "~" {
+        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
+    }
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    path.to_path_buf()
+}
 fn default_poll() -> u64 {
     30
 }
@@ -95,7 +109,9 @@ impl Config {
         let s = fs::read_to_string(Self::path()).with_context(|| {
             "no hay configuración; ejecutá `gdsync login --client-id ... --client-secret ...`"
         })?;
-        Ok(serde_json::from_str(&s)?)
+        let mut cfg: Self = serde_json::from_str(&s)?;
+        cfg.mount_point = expand_tilde(&cfg.mount_point);
+        Ok(cfg)
     }
     pub fn load_or_default() -> Self {
         Self::load().unwrap_or_else(|_| Self::new(String::new(), String::new()))
@@ -304,5 +320,13 @@ mod tests {
 
         let invalid = r#"{"other": {}}"#;
         assert!(parse_google_credentials_json(invalid).is_err());
+    }
+
+    #[test]
+    fn test_expand_tilde() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_tilde(Path::new("~/GoogleDrive")), home.join("GoogleDrive"));
+        assert_eq!(expand_tilde(Path::new("~")), home);
+        assert_eq!(expand_tilde(Path::new("/mnt/drive")), PathBuf::from("/mnt/drive"));
     }
 }

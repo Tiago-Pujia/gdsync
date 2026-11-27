@@ -42,6 +42,8 @@ export component AppWindow inherits Window {
     in property <int> pinned-count: 0;
     in property <int> pending-uploads-count: 0;
     in property <string> pending-bytes-str: "0 B";
+    in property <string> queue-summary-text: "Cola vacía. No hay tareas pendientes.";
+    in property <int> queue-failed-count: 0;
 
     // Lists
     in property <[FileEntry]> files: [];
@@ -52,7 +54,7 @@ export component AppWindow inherits Window {
     in property <[LogEntry]> logs: [];
 
     // Settings
-    in-out property <string> mount-point: "/home/tiago/GoogleDrive";
+    in-out property <string> mount-point: "~/GoogleDrive";
     in-out property <string> cache-size-gb: "10";
     in-out property <string> poll-interval-secs: "30";
     in-out property <bool> autostart-gui: true;
@@ -112,6 +114,8 @@ export component AppWindow inherits Window {
     callback retry-queue-item(int);
     callback cancel-queue-item(int);
     callback retry-all-queue();
+    callback refresh-queue();
+    callback show-queue-error-detail(int);
 
     // Callbacks from Selective
     callback toggle-folder(string, bool);
@@ -220,9 +224,13 @@ export component AppWindow inherits Window {
                 // View 2: Queue
                 if root.active-tab == 2: QueueView {
                     queue-items: root.queue-items;
+                    summary-text: root.queue-summary-text;
+                    failed-count: root.queue-failed-count;
                     retry-item(id) => { root.retry-queue-item(id); }
                     discard-item(id) => { root.cancel-queue-item(id); }
                     retry-all-failed => { root.retry-all-queue(); }
+                    refresh-queue => { root.refresh-queue(); }
+                    show-error-detail(id) => { root.show-queue-error-detail(id); }
                 }
 
                 // View 3: Selective Sync

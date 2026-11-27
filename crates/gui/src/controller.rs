@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arboard::Clipboard;
 use gdsync_core::config::{self, Config};
-use gdsync_core::db::{Db, ExplorerItem, LocalFileStatus, PinnedRootItem};
+use gdsync_core::db::{Db, ExplorerItem, LocalFileStatus, PinnedRootItem, QueueItemView};
 use gdsync_core::drive::Drive;
 use slint::{Color, ComponentHandle, Model, ModelRc, VecModel};
 
@@ -23,6 +24,8 @@ pub struct GuiController {
     tray_status: Arc<Mutex<String>>,
     raw_explorer_items: Arc<Mutex<Vec<ExplorerItem>>>,
     raw_pinned_items: Arc<Mutex<Vec<PinnedRootItem>>>,
+    last_queue_items: Arc<Mutex<Vec<QueueItemView>>>,
+    periodic_in_flight: Arc<AtomicBool>,
     active_search_query: Arc<Mutex<String>>,
     active_filter_idx: Arc<Mutex<i32>>,
     pinned_search_query: Arc<Mutex<String>>,
@@ -47,6 +50,8 @@ impl GuiController {
             tray_status,
             raw_explorer_items: Arc::new(Mutex::new(Vec::new())),
             raw_pinned_items: Arc::new(Mutex::new(Vec::new())),
+            last_queue_items: Arc::new(Mutex::new(Vec::new())),
+            periodic_in_flight: Arc::new(AtomicBool::new(false)),
             active_search_query: Arc::new(Mutex::new(String::new())),
             active_filter_idx: Arc::new(Mutex::new(0)),
             pinned_search_query: Arc::new(Mutex::new(String::new())),
@@ -55,13 +60,42 @@ impl GuiController {
     }
 
     pub fn get_drive(&self) -> Option<Arc<Drive>> {
+        if let Some(existing) = self.drive.lock().unwrap().as_ref() {
+            return Some(existing.clone());
+        }
+        // Snapshot config before locking `self.drive` so locks are never nested.
+        let cfg_snapshot = self.cfg.lock().unwrap().clone();
+        let new_drive = Drive::new(cfg_snapshot).ok().map(Arc::new);
         let mut guard = self.drive.lock().unwrap();
         if guard.is_none() {
-            if let Ok(d) = Drive::new(self.cfg.lock().unwrap().clone()) {
-                *guard = Some(Arc::new(d));
-            }
+            *guard = new_drive;
         }
         guard.clone()
+    }
+
+    fn invalidate_drive(&self) {
+        *self.drive.lock().unwrap() = None;
+    }
+
+    fn resolve_web_url(&self, id: &str) -> String {
+        if id.is_empty() {
+            return "https://drive.google.com/drive/my-drive".to_string();
+        }
+        if let Ok(Some(item)) = self.db.by_id(id) {
+            let target_id = if item.is_shortcut() {
+                item.shortcut_target_id().unwrap_or_else(|| item.id.clone())
+            } else {
+                item.id.clone()
+            };
+            if let Some(link) = item.web_link {
+                return link;
+            }
+            if item.is_dir() {
+                return format!("https://drive.google.com/drive/folders/{}", target_id);
+            }
+            return format!("https://drive.google.com/file/d/{}/view", target_id);
+        }
+        format!("https://drive.google.com/file/d/{}/view", id)
     }
 
     pub fn init_and_bind(self: Arc<Self>) {
@@ -117,16 +151,24 @@ impl GuiController {
         {
             let this = self.clone();
             app.on_toggle_daemon(move || {
-                let running = desktop::is_daemon_running();
                 let mount = this.cfg.lock().unwrap().mount_point.clone();
-                if running {
-                    desktop::stop_daemon(&mount);
-                    this.show_toast("Servicio Detenido", "gdsyncd se ha detenido y desmontado.", false);
-                } else {
-                    desktop::start_daemon();
-                    this.show_toast("Servicio Iniciado", "gdsyncd se está ejecutando.", false);
-                }
-                this.refresh_periodic();
+                let this_bg = this.clone();
+                std::thread::spawn(move || {
+                    let running = desktop::is_daemon_running();
+                    if running {
+                        desktop::stop_daemon(&mount);
+                    } else {
+                        desktop::start_daemon();
+                    }
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if running {
+                            this_bg.show_toast("Servicio Detenido", "gdsyncd se ha detenido y desmontado.", false);
+                        } else {
+                            this_bg.show_toast("Servicio Iniciado", "gdsyncd se está ejecutando.", false);
+                        }
+                        this_bg.refresh_periodic();
+                    });
+                });
             });
         }
 
@@ -144,17 +186,22 @@ impl GuiController {
             let this = self.clone();
             app.on_sync_now(move || {
                 *this.last_quota_fetch.lock().unwrap() = None;
-                this.show_toast("Sincronización", "Consultando cambios en Google Drive...", false);
-                let this = this.clone();
-                if let Some(drive) = this.get_drive() {
-                    tokio::spawn(async move {
-                        let _ = drive.start_page_token().await;
-                        slint::invoke_from_event_loop(move || {
-                            this.refresh_periodic();
-                            this.refresh_explorer();
-                        }).ok();
+                let this_bg = this.clone();
+                std::thread::spawn(move || {
+                    let triggered = desktop::trigger_daemon_sync();
+                    if triggered {
+                        std::thread::sleep(Duration::from_millis(400));
+                    }
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if triggered {
+                            this_bg.show_toast("Sincronización", "Comprobando cambios y subidas pendientes...", false);
+                        } else {
+                            this_bg.show_toast("Servicio detenido", "Iniciá el servicio gdsyncd para sincronizar cambios.", true);
+                        }
+                        this_bg.refresh_periodic();
+                        this_bg.refresh_explorer();
                     });
-                }
+                });
             });
         }
 
@@ -209,8 +256,10 @@ impl GuiController {
                         if !unpinned_files.is_empty() {
                             if let Some(drive) = this.get_drive() {
                                 let db = this.db.clone();
+                                let this_done = this.clone();
                                 tokio::spawn(async move {
                                     let cache_dir = config::cache_dir().join("blobs");
+                                    let _ = std::fs::create_dir_all(&cache_dir);
                                     for item in unpinned_files {
                                         let dest = cache_dir.join(&item.id);
                                         if !dest.exists() {
@@ -219,6 +268,11 @@ impl GuiController {
                                             }
                                         }
                                     }
+                                    let _ = slint::invoke_from_event_loop(move || {
+                                        this_done.refresh_explorer();
+                                        this_done.refresh_pinned_items();
+                                        this_done.refresh_periodic();
+                                    });
                                 });
                             }
                         }
@@ -236,7 +290,7 @@ impl GuiController {
         {
             let this = self.clone();
             app.on_copy_link(move |id| {
-                let url = format!("https://drive.google.com/file/d/{}/view", id);
+                let url = this.resolve_web_url(&id);
                 if let Ok(mut cb) = Clipboard::new() {
                     let _ = cb.set_text(&url);
                     this.show_toast("Enlace Copiado", "URL de Google Drive copiada al portapapeles.", false);
@@ -247,14 +301,13 @@ impl GuiController {
         }
 
         // Open Web
-        app.on_open_web(move |id| {
-            let url = if id.is_empty() {
-                "https://drive.google.com/drive/my-drive".to_string()
-            } else {
-                format!("https://drive.google.com/file/d/{}/view", id)
-            };
-            desktop::open_web_url(&url);
-        });
+        {
+            let this = self.clone();
+            app.on_open_web(move |id| {
+                let url = this.resolve_web_url(&id);
+                desktop::open_web_url(&url);
+            });
+        }
 
         // Open Local
         {
@@ -262,11 +315,22 @@ impl GuiController {
             app.on_open_local(move |loc| {
                 let loc_str = loc.to_string();
                 let mount = this.cfg.lock().unwrap().mount_point.clone();
-                let full = if loc_str.starts_with('/') {
-                    PathBuf::from(&loc_str)
+                let resolved_path = if let Ok(Some(item)) = this.db.resolve_path_or_id(&mount, &loc_str) {
+                    if let Ok(Some(rel)) = this.db.resolve_item_relative_path(&item.id) {
+                        Some(mount.join(rel))
+                    } else {
+                        None
+                    }
                 } else {
-                    mount.join(loc_str)
+                    None
                 };
+                let full = resolved_path.unwrap_or_else(|| {
+                    if loc_str.starts_with('/') {
+                        PathBuf::from(&loc_str)
+                    } else {
+                        mount.join(&loc_str)
+                    }
+                });
                 desktop::open_path_in_file_manager(&full);
             });
         }
@@ -276,6 +340,7 @@ impl GuiController {
             let this = self.clone();
             app.on_retry_queue_item(move |id| {
                 let _ = this.db.retry_upload_ids(&[id as i64]);
+                let _ = desktop::trigger_daemon_sync();
                 this.show_toast("Reintentando", "Tarea encolada nuevamente para subida.", false);
                 this.refresh_periodic();
             });
@@ -292,8 +357,40 @@ impl GuiController {
             let this = self.clone();
             app.on_retry_all_queue(move || {
                 let count = this.db.retry_failed_uploads().unwrap_or(0);
+                if count > 0 {
+                    let _ = desktop::trigger_daemon_sync();
+                }
                 this.show_toast("Reintento general", &format!("{} tareas fallidas reintentadas.", count), false);
                 this.refresh_periodic();
+            });
+        }
+        {
+            let this = self.clone();
+            app.on_refresh_queue(move || {
+                this.refresh_periodic();
+                this.show_toast("Cola actualizada", "Estado de la cola de sincronización refrescado.", false);
+            });
+        }
+        {
+            let this = self.clone();
+            app.on_show_queue_error_detail(move |id| {
+                let target_id = id as i64;
+                let err_msg = {
+                    let guard = this.last_queue_items.lock().unwrap();
+                    guard
+                        .iter()
+                        .find(|q| q.id == target_id)
+                        .and_then(|q| q.last_error.clone())
+                }
+                .or_else(|| {
+                    this.db
+                        .list_queue_items(100)
+                        .ok()
+                        .and_then(|list| list.into_iter().find(|q| q.id == target_id))
+                        .and_then(|q| q.last_error)
+                })
+                .unwrap_or_else(|| "Sin detalles adicionales de error registrados.".to_string());
+                this.show_error(&format!("Detalle de error (Tarea #{})", id), &err_msg);
             });
         }
 
@@ -302,22 +399,26 @@ impl GuiController {
             let this = self.clone();
             app.on_toggle_folder(move |id, checked| {
                 let id_str = id.to_string();
-                let mut cfg = this.cfg.lock().unwrap();
-                if checked {
-                    cfg.add_sync_folder(id_str);
-                } else {
-                    cfg.remove_sync_folder(&id_str);
+                {
+                    let mut cfg = this.cfg.lock().unwrap();
+                    if checked {
+                        cfg.add_sync_folder(id_str);
+                    } else {
+                        cfg.remove_sync_folder(&id_str);
+                    }
+                    let _ = cfg.save();
                 }
-                let _ = cfg.save();
                 this.refresh_selective_folders();
             });
         }
         {
             let this = self.clone();
             app.on_sync_all_folders(move || {
-                let mut cfg = this.cfg.lock().unwrap();
-                cfg.reset_sync_folders();
-                let _ = cfg.save();
+                {
+                    let mut cfg = this.cfg.lock().unwrap();
+                    cfg.reset_sync_folders();
+                    let _ = cfg.save();
+                }
                 this.show_toast("Sincronización Total", "Se sincronizarán todas las carpetas ('root').", false);
                 this.refresh_selective_folders();
             });
@@ -325,8 +426,10 @@ impl GuiController {
         {
             let this = self.clone();
             app.on_save_folder_selection(move || {
-                let cfg = this.cfg.lock().unwrap();
-                let _ = cfg.save();
+                {
+                    let cfg = this.cfg.lock().unwrap();
+                    let _ = cfg.save();
+                }
                 this.show_toast("Guardado", "Configuración de sincronización selectiva guardada.", false);
             });
         }
@@ -348,36 +451,47 @@ impl GuiController {
         {
             let this = self.clone();
             app.on_import_credentials_json(move || {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("JSON de Google Cloud", &["json"])
-                    .pick_file()
-                {
-                    match workers::parse_google_credentials_json(&path) {
-                        Ok((cid, secret)) => {
-                            let mut cfg = this.cfg.lock().unwrap();
-                            cfg.client_id = cid.clone();
-                            cfg.client_secret = secret.clone();
-                            let _ = cfg.save();
-                            if let Some(w) = this.app.upgrade() {
-                                w.set_client_id(cid.into());
-                                w.set_client_secret(secret.into());
+                let this_bg = this.clone();
+                std::thread::spawn(move || {
+                    let picked = rfd::FileDialog::new()
+                        .add_filter("JSON de Google Cloud", &["json"])
+                        .pick_file();
+                    let Some(path) = picked else { return };
+                    let parsed = workers::parse_google_credentials_json(&path);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        match parsed {
+                            Ok((cid, secret)) => {
+                                {
+                                    let mut cfg = this_bg.cfg.lock().unwrap();
+                                    cfg.client_id = cid.clone();
+                                    cfg.client_secret = secret.clone();
+                                    let _ = cfg.save();
+                                }
+                                this_bg.invalidate_drive();
+                                if let Some(w) = this_bg.app.upgrade() {
+                                    w.set_client_id(cid.into());
+                                    w.set_client_secret(secret.into());
+                                }
+                                this_bg.show_toast("Credenciales importadas", "Archivo JSON de Google Cloud cargado con éxito.", false);
                             }
-                            this.show_toast("Credenciales importadas", "Archivo JSON de Google Cloud cargado con éxito.", false);
+                            Err(e) => {
+                                this_bg.show_error("Error al importar JSON", &e.to_string());
+                            }
                         }
-                        Err(e) => {
-                            this.show_error("Error al importar JSON", &e.to_string());
-                        }
-                    }
-                }
+                    });
+                });
             });
         }
         {
             let this = self.clone();
             app.on_save_credentials(move |id, secret| {
-                let mut cfg = this.cfg.lock().unwrap();
-                cfg.client_id = id.to_string();
-                cfg.client_secret = secret.to_string();
-                let _ = cfg.save();
+                {
+                    let mut cfg = this.cfg.lock().unwrap();
+                    cfg.client_id = id.to_string();
+                    cfg.client_secret = secret.to_string();
+                    let _ = cfg.save();
+                }
+                this.invalidate_drive();
                 this.show_toast("Guardado", "Credenciales OAuth 2.0 guardadas en config.json.", false);
             });
         }
@@ -405,9 +519,12 @@ impl GuiController {
                         }
                         match res {
                             Ok(()) => {
+                                this.invalidate_drive();
+                                *this.last_quota_fetch.lock().unwrap() = None;
                                 this.show_toast("Sesión iniciada", "Conexión con Google Drive establecida exitosamente.", false);
                                 this.refresh_periodic();
                                 this.refresh_selective_folders();
+                                this.refresh_explorer();
                             }
                             Err(e) => {
                                 this.show_error("Fallo de Autenticación", &e.to_string());
@@ -422,33 +539,50 @@ impl GuiController {
         {
             let this = self.clone();
             app.on_browse_mount_point(move || {
-                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                    if let Some(w) = this.app.upgrade() {
-                        w.set_mount_point(dir.to_string_lossy().to_string().into());
+                let app_weak = this.app.clone();
+                std::thread::spawn(move || {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(w) = app_weak.upgrade() {
+                                w.set_mount_point(dir.to_string_lossy().to_string().into());
+                            }
+                        });
                     }
-                }
+                });
             });
         }
         {
             let this = self.clone();
             app.on_save_settings(move || {
                 let Some(w) = this.app.upgrade() else { return };
-                let mut cfg = this.cfg.lock().unwrap();
-                cfg.mount_point = PathBuf::from(w.get_mount_point().as_str());
-                if let Ok(gb) = w.get_cache_size_gb().as_str().parse::<u64>() {
-                    cfg.cache_max_gb = gb;
+                let expanded_mount = config::expand_tilde(&PathBuf::from(w.get_mount_point().as_str()));
+                w.set_mount_point(expanded_mount.to_string_lossy().to_string().into());
+                let auto_gui = w.get_autostart_gui();
+                let auto_daemon = w.get_autostart_daemon();
+                {
+                    let mut cfg = this.cfg.lock().unwrap();
+                    cfg.mount_point = expanded_mount.clone();
+                    if let Ok(gb) = w.get_cache_size_gb().as_str().parse::<u64>() {
+                        if gb > 0 {
+                            cfg.cache_max_gb = gb;
+                        }
+                    }
+                    if let Ok(poll) = w.get_poll_interval_secs().as_str().parse::<u64>() {
+                        if poll >= 5 {
+                            cfg.poll_interval_secs = poll;
+                        }
+                    }
+                    cfg.notifications_enabled = w.get_notify_enabled();
+                    cfg.persistent_upload_notify = w.get_resident_notify();
+                    cfg.close_to_tray = w.get_close_to_tray();
+                    let _ = cfg.save();
                 }
-                if let Ok(poll) = w.get_poll_interval_secs().as_str().parse::<u64>() {
-                    cfg.poll_interval_secs = poll;
-                }
-                cfg.notifications_enabled = w.get_notify_enabled();
-                cfg.persistent_upload_notify = w.get_resident_notify();
-                cfg.close_to_tray = w.get_close_to_tray();
-                let _ = cfg.save();
 
-                desktop::set_autostart_gui(w.get_autostart_gui());
-                desktop::set_autostart_daemon(w.get_autostart_daemon());
-                desktop::ensure_dolphin_bookmark(&cfg.mount_point);
+                std::thread::spawn(move || {
+                    desktop::set_autostart_gui(auto_gui);
+                    desktop::set_autostart_daemon(auto_daemon);
+                    desktop::ensure_dolphin_bookmark(&expanded_mount);
+                });
 
                 this.show_toast("Ajustes Guardados", "Los cambios se aplicaron correctamente.", false);
             });
@@ -491,19 +625,32 @@ impl GuiController {
                 let tag_str = tag.to_string();
                 if tag_str == "resync" {
                     let mount = this.cfg.lock().unwrap().mount_point.clone();
-                    match workers::perform_resync(&mount) {
-                        Ok(()) => {
-                            this.show_toast("Resync completado", "Base de datos y caché restablecidas.", false);
-                            this.refresh_periodic();
-                            this.refresh_explorer();
-                        }
-                        Err(e) => {
-                            this.show_error("Error al restablecer", &e.to_string());
-                        }
-                    }
+                    let this_bg = this.clone();
+                    this.show_toast("Restableciendo...", "Deteniendo el servicio y limpiando caché y base de datos.", false);
+                    std::thread::spawn(move || {
+                        let res = workers::perform_resync(&mount);
+                        let _ = slint::invoke_from_event_loop(move || {
+                            match res {
+                                Ok(()) => {
+                                    this_bg.show_toast("Resync completado", "Base de datos y caché restablecidas.", false);
+                                    this_bg.refresh_periodic();
+                                    this_bg.refresh_explorer();
+                                }
+                                Err(e) => {
+                                    this_bg.show_error("Error al restablecer", &e.to_string());
+                                }
+                            }
+                        });
+                    });
                 } else if tag_str == "logout" {
                     let token_file = gdsync_core::auth::Token::path();
                     let _ = std::fs::remove_file(token_file);
+                    let _ = this.db.kv_set("account_email", "");
+                    this.invalidate_drive();
+                    *this.last_quota_fetch.lock().unwrap() = None;
+                    if let Some(w) = this.app.upgrade() {
+                        w.set_user_email("".into());
+                    }
                     this.show_toast("Sesión cerrada", "Tokens eliminados correctamente.", false);
                     this.refresh_periodic();
                 }
@@ -692,135 +839,199 @@ impl GuiController {
     }
 
     pub fn refresh_periodic(&self) {
-        let Some(app) = self.app.upgrade() else { return };
-
-        let daemon_running = desktop::is_daemon_running();
-        app.set_daemon_running(daemon_running);
-
-        let is_logged = gdsync_core::auth::Token::path().exists();
-        app.set_account_connected(is_logged);
-
-        let user_email = self.db.kv_get("account_email").unwrap_or(None).unwrap_or_default();
-        if !user_email.is_empty() {
-            let avatar = user_email.chars().next().unwrap_or('G').to_uppercase().to_string();
-            app.set_user_email(user_email.clone().into());
-            app.set_user_avatar(avatar.into());
-            app.set_account_label(user_email.into());
-        } else if is_logged {
-            app.set_user_avatar("G".into());
-            app.set_account_label("Sesión Activa".into());
-        } else {
-            app.set_user_avatar("?".into());
-            app.set_account_label("No conectado".into());
+        if self
+            .periodic_in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
         }
 
-        // Storage and Cache Stats
-        let cache_bytes = self.db.cache_total().unwrap_or(0);
-        let cache_max_gb = self.cfg.lock().unwrap().cache_max_gb;
-        let cache_limit_bytes = cache_max_gb * 1024 * 1024 * 1024;
-        let cache_pct = if cache_limit_bytes > 0 {
-            (cache_bytes as f32) / (cache_limit_bytes as f32)
-        } else {
-            0.0
-        };
+        let app_weak = self.app.clone();
+        let app_weak_quota = self.app.clone();
+        let db = self.db.clone();
+        let db_quota = self.db.clone();
+        let cfg_lock = self.cfg.clone();
+        let notifications = self.notifications.clone();
+        let notif_quota = self.notifications.clone();
+        let tray_status = self.tray_status.clone();
+        let last_queue_items = self.last_queue_items.clone();
+        let in_flight = self.periodic_in_flight.clone();
+        let drive_opt = self.get_drive();
+        let last_quota_fetch = self.last_quota_fetch.clone();
 
-        app.set_cache_used_str(format_bytes(cache_bytes).into());
-        app.set_cache_limit_str(format!("{} GB", cache_max_gb).into());
-        app.set_cache_pct(cache_pct);
-        let cache_files_count = self.db.cache_count().unwrap_or(0);
-        app.set_cache_files_count(cache_files_count as i32);
-
-        let pinned_count = self.db.count_pinned_items().unwrap_or(0);
-        app.set_pinned_count(pinned_count as i32);
-
-        // Upload Queue Stats
-        if let Ok(summary) = self.db.pending_uploads_summary() {
-            let total_pending = summary.total;
-            app.set_pending_uploads_count(total_pending as i32);
-            app.set_pending_bytes_str(format_bytes(summary.upload_bytes).into());
-
-            // Notifications
-            let (notif_on, persist_on) = {
-                let cfg = self.cfg.lock().unwrap();
-                (cfg.notifications_enabled, cfg.persistent_upload_notify)
-            };
-            self.notifications.lock().unwrap().update_queue_status(
-                total_pending as usize,
-                summary.upload_bytes,
-                notif_on,
-                persist_on,
-            );
-
-            // Tray Status Text
-            let tray_txt = if !daemon_running {
-                "⚪ Servicio detenido".to_string()
-            } else if total_pending > 0 {
-                format!("📤 Subiendo {} archivo(s)...", total_pending)
-            } else {
-                "✅ Todo sincronizado".to_string()
-            };
-            *self.tray_status.lock().unwrap() = tray_txt;
-        }
-
-        // Queue Items Table
-        if let Ok(q_items) = self.db.list_queue_items(100) {
-            let entries: Vec<QueueEntry> = q_items
-                .into_iter()
-                .map(|q| QueueEntry {
-                    id: q.id as i32,
-                    op: q.op.into(),
-                    file_id: q.file_id.into(),
-                    display_name: q.display_name.into(),
-                    size_str: format_bytes(q.size_bytes).into(),
-                    status: q.status.clone().into(),
-                    is_failed: q.status == "failed",
-                    attempts: q.attempts as i32,
-                    created_str: "".into(),
-                    last_error: q.last_error.unwrap_or_default().into(),
-                })
-                .collect();
-            app.set_queue_items(ModelRc::from(Rc::new(VecModel::from(entries))));
-        }
-
-        // Fetch storage quota periodically in background if logged in (throttled to once every 60s)
-        if is_logged {
-            let should_fetch = {
-                let mut last = self.last_quota_fetch.lock().unwrap();
-                match *last {
-                    Some(instant) if instant.elapsed() < Duration::from_secs(60) => false,
-                    _ => {
-                        *last = Some(std::time::Instant::now());
-                        true
-                    }
-                }
-            };
-
-            if should_fetch {
-                if let Some(drive) = self.get_drive() {
-                    let app_weak = self.app.clone();
-                    let notif = self.notifications.clone();
-                    let notif_enabled = self.cfg.lock().unwrap().notifications_enabled;
-
-                    tokio::spawn(async move {
-                        if let Ok((used, total)) = drive.about_storage().await {
-                            let pct = if total > 0 { (used as f32) / (total as f32) } else { 0.0 };
-                            let used_str = format_bytes(used);
-                            let total_str = format_bytes(total);
-
-                            notif.lock().unwrap().check_quota_warning(used, total, notif_enabled);
-
-                            slint::invoke_from_event_loop(move || {
-                                if let Some(w) = app_weak.upgrade() {
-                                    w.set_drive_used_str(used_str.into());
-                                    w.set_drive_total_str(total_str.into());
-                                    w.set_drive_pct(pct);
-                                }
-                            }).ok();
-                        }
-                    });
+        tokio::task::spawn_blocking(move || {
+            struct Guard(Arc<AtomicBool>);
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
                 }
             }
-        }
+            let _guard = Guard(in_flight);
+
+            let daemon_running = desktop::is_daemon_running();
+            let is_logged = gdsync_core::auth::Token::path().exists();
+            let user_email = db.kv_get("account_email").unwrap_or(None).unwrap_or_default();
+
+            let cache_bytes = db.cache_total().unwrap_or(0);
+            let cache_files_count = db.cache_count().unwrap_or(0);
+            let pinned_count = db.count_pinned_items().unwrap_or(0);
+            let (cache_max_gb, notif_on, persist_on) = {
+                let cfg = cfg_lock.lock().unwrap();
+                (cfg.cache_max_gb, cfg.notifications_enabled, cfg.persistent_upload_notify)
+            };
+
+            let summary = db.pending_uploads_summary().ok();
+            let q_items = db.list_queue_items(100).ok();
+
+            if let Some(ref sum) = summary {
+                notifications.lock().unwrap().update_queue_status(
+                    sum.total as usize,
+                    sum.upload_bytes,
+                    notif_on,
+                    persist_on,
+                );
+
+                let tray_txt = if !daemon_running {
+                    "⚪ Servicio detenido".to_string()
+                } else if sum.total > 0 {
+                    format!("📤 Subiendo {} archivo(s)...", sum.total)
+                } else {
+                    "✅ Todo sincronizado".to_string()
+                };
+                *tray_status.lock().unwrap() = tray_txt;
+            }
+
+            let queue_changed = if let Some(ref items) = q_items {
+                let mut prev = last_queue_items.lock().unwrap();
+                if *prev != *items {
+                    *prev = items.clone();
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(app) = app_weak.upgrade() else { return };
+
+                app.set_daemon_running(daemon_running);
+                app.set_account_connected(is_logged);
+
+                if !user_email.is_empty() {
+                    let avatar = user_email.chars().next().unwrap_or('G').to_uppercase().to_string();
+                    app.set_user_email(user_email.clone().into());
+                    app.set_user_avatar(avatar.into());
+                    app.set_account_label(user_email.into());
+                } else if is_logged {
+                    app.set_user_email("".into());
+                    app.set_user_avatar("G".into());
+                    app.set_account_label("Sesión Activa".into());
+                } else {
+                    app.set_user_email("".into());
+                    app.set_user_avatar("?".into());
+                    app.set_account_label("No conectado".into());
+                }
+
+                let cache_limit_bytes = cache_max_gb * 1024 * 1024 * 1024;
+                let cache_pct = if cache_limit_bytes > 0 {
+                    (cache_bytes as f32) / (cache_limit_bytes as f32)
+                } else {
+                    0.0
+                };
+                app.set_cache_used_str(format_bytes(cache_bytes).into());
+                app.set_cache_limit_str(format!("{} GB", cache_max_gb).into());
+                app.set_cache_pct(cache_pct);
+                app.set_cache_files_count(cache_files_count as i32);
+                app.set_pinned_count(pinned_count as i32);
+
+                if let Some(sum) = summary {
+                    app.set_pending_uploads_count(sum.total as i32);
+                    app.set_pending_bytes_str(format_bytes(sum.upload_bytes).into());
+                    app.set_queue_failed_count(sum.failed as i32);
+
+                    let summary_txt = if sum.total == 0 && sum.failed == 0 {
+                        "Cola vacía. No hay tareas pendientes.".to_string()
+                    } else if sum.failed > 0 && sum.total == 0 {
+                        format!("{} tarea(s) fallida(s). Podés reintentarlas o descartarlas.", sum.failed)
+                    } else if sum.failed > 0 {
+                        format!("{} pendiente(s) ({}) | {} fallida(s).", sum.total, format_bytes(sum.upload_bytes), sum.failed)
+                    } else {
+                        format!("{} tarea(s) pendiente(s) ({}).", sum.total, format_bytes(sum.upload_bytes))
+                    };
+                    app.set_queue_summary_text(summary_txt.into());
+                }
+
+                if queue_changed {
+                    if let Some(items) = q_items {
+                        let entries: Vec<QueueEntry> = items
+                            .into_iter()
+                            .map(|q| QueueEntry {
+                                id: q.id as i32,
+                                op: q.op.into(),
+                                file_id: q.file_id.into(),
+                                display_name: q.display_name.into(),
+                                size_str: format_bytes(q.size_bytes).into(),
+                                status: q.status.clone().into(),
+                                is_failed: q.status == "failed",
+                                attempts: q.attempts as i32,
+                                created_str: "".into(),
+                                last_error: q.last_error.unwrap_or_default().into(),
+                            })
+                            .collect();
+                        app.set_queue_items(ModelRc::from(Rc::new(VecModel::from(entries))));
+                    }
+                }
+            });
+
+            // Fetch storage quota & account email periodically in background if logged in (throttled to once every 60s)
+            if is_logged {
+                let should_fetch = {
+                    let mut last = last_quota_fetch.lock().unwrap();
+                    match *last {
+                        Some(instant) if instant.elapsed() < Duration::from_secs(60) => false,
+                        _ => {
+                            *last = Some(std::time::Instant::now());
+                            true
+                        }
+                    }
+                };
+
+                if should_fetch {
+                    if let Some(drive) = drive_opt {
+                        tokio::spawn(async move {
+                            if let Ok((used, total, email)) = drive.about_info().await {
+                                let pct = if total > 0 { (used as f32) / (total as f32) } else { 0.0 };
+                                let used_str = format_bytes(used);
+                                let total_str = format_bytes(total);
+
+                                if let Some(ref em) = email {
+                                    let _ = db_quota.kv_set("account_email", em);
+                                }
+
+                                notif_quota.lock().unwrap().check_quota_warning(used, total, notif_on);
+
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(w) = app_weak_quota.upgrade() {
+                                        w.set_drive_used_str(used_str.into());
+                                        w.set_drive_total_str(total_str.into());
+                                        w.set_drive_pct(pct);
+                                        if let Some(em) = email {
+                                            let avatar = em.chars().next().unwrap_or('G').to_uppercase().to_string();
+                                            w.set_user_email(em.clone().into());
+                                            w.set_user_avatar(avatar.into());
+                                            w.set_account_label(em.into());
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                    }
+                }
+            }
+        });
     }
 
     pub fn refresh_explorer(&self) {
@@ -998,28 +1209,32 @@ impl GuiController {
     }
 
     pub fn refresh_logs(&self) {
-        let Some(app) = self.app.upgrade() else { return };
-        let parsed = workers::fetch_journal_logs(150);
+        let app_weak = self.app.clone();
+        std::thread::spawn(move || {
+            let parsed = workers::fetch_journal_logs(150);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(app) = app_weak.upgrade() else { return };
+                let entries: Vec<LogEntry> = parsed
+                    .into_iter()
+                    .map(|p| {
+                        let level_color = match p.level_color_code {
+                            1 => Color::from_rgb_u8(16, 185, 129),   // success
+                            2 => Color::from_rgb_u8(245, 158, 11),   // warning
+                            3 => Color::from_rgb_u8(239, 68, 68),    // danger
+                            _ => Color::from_rgb_u8(59, 130, 246),   // info
+                        };
+                        LogEntry {
+                            timestamp: p.timestamp.into(),
+                            level: p.level.into(),
+                            level_color,
+                            message: p.message.into(),
+                        }
+                    })
+                    .collect();
 
-        let entries: Vec<LogEntry> = parsed
-            .into_iter()
-            .map(|p| {
-                let level_color = match p.level_color_code {
-                    1 => Color::from_rgb_u8(16, 185, 129),   // success
-                    2 => Color::from_rgb_u8(245, 158, 11),   // warning
-                    3 => Color::from_rgb_u8(239, 68, 68),    // danger
-                    _ => Color::from_rgb_u8(59, 130, 246),    // info
-                };
-                LogEntry {
-                    timestamp: p.timestamp.into(),
-                    level: p.level.into(),
-                    level_color,
-                    message: p.message.into(),
-                }
-            })
-            .collect();
-
-        app.set_logs(ModelRc::from(Rc::new(VecModel::from(entries))));
+                app.set_logs(ModelRc::from(Rc::new(VecModel::from(entries))));
+            });
+        });
     }
 
     pub fn open_share_modal(&self, file_id_or_path: &str) {

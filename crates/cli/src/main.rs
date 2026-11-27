@@ -541,7 +541,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 Some(ConfigCmd::SetMount { path }) => {
-                    cfg.mount_point = path;
+                    cfg.mount_point = gdsync_core::config::expand_tilde(&path);
                     cfg.save()?;
                     println!("Punto de montaje actualizado a: {}", cfg.mount_point.display());
                 }
@@ -1155,7 +1155,7 @@ async fn main() -> Result<()> {
                             Name=gdsync\n\
                             GenericName=Cliente de Google Drive\n\
                             Comment=Google Drive sincronizado en tu gestor de archivos\n\
-                            Exec=gdsync gui --minimized\n\
+                            Exec=gdsync-gui --minimized\n\
                             Icon=gdsync\n\
                             Terminal=false\n\
                             Categories=Network;FileTransfer;Utility;\n\
@@ -1228,17 +1228,17 @@ fn clean_input_path(path: &Path) -> PathBuf {
 fn copy_to_clipboard(text: &str) -> bool {
     // 1. KDE Plasma / Klipper vía DBus (Wayland y X11)
     for cmd in ["qdbus6", "qdbus"] {
-        if let Ok(status) = std::process::Command::new(cmd)
+        if let Ok(out) = std::process::Command::new(cmd)
             .args(["org.kde.klipper", "/klipper", "setClipboardContents", text])
-            .status()
+            .output()
         {
-            if status.success() {
+            if out.status.success() {
                 return true;
             }
         }
     }
 
-    if let Ok(status) = std::process::Command::new("gdbus")
+    if let Ok(out) = std::process::Command::new("gdbus")
         .args([
             "call",
             "--session",
@@ -1250,9 +1250,9 @@ fn copy_to_clipboard(text: &str) -> bool {
             "org.kde.klipper.klipper.setClipboardContents",
             text,
         ])
-        .status()
+        .output()
     {
-        if status.success() {
+        if out.status.success() {
             return true;
         }
     }
